@@ -1,0 +1,11 @@
+{
+  "servers": {
+    "IFC MCP": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "${workspaceFolder}/bin/ifc-mcp.js"
+      ]
+    }
+  }
+}

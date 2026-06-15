@@ -1,0 +1,11 @@
+* text=auto eol=lf
+
+*.ifc text eol=lf
+*.ifcxml text eol=lf
+*.bcf text eol=lf
+*.bcfzip binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.wasm binary

@@ -1,0 +1,146 @@
+name: Publish package and MCP registry
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Check publish status
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          package_name="$(node -p "require('./package.json').name")"
+          package_version="$(node -p "require('./package.json').version")"
+          server_name="$(node -p "require('./server.json').name")"
+          server_version="$(node -p "require('./server.json').version")"
+          server_package_version="$(node -p "require('./server.json').packages[0].version")"
+          encoded_server_name="$(node -p "encodeURIComponent(require('./server.json').name)")"
+
+          if [ "$package_version" != "$server_version" ] || [ "$package_version" != "$server_package_version" ]; then
+            echo "Version mismatch:"
+            echo "package.json version: ${package_version}"
+            echo "server.json version: ${server_version}"
+            echo "server.json package version: ${server_package_version}"
+            exit 1
+          fi
+
+          npm_already_published=false
+          if npm view "${package_name}@${package_version}" version >/dev/null 2>&1; then
+            npm_already_published=true
+          fi
+
+          mcp_already_published=false
+          if curl -fsS -o /dev/null "https://registry.modelcontextprotocol.io/v0.1/servers/${encoded_server_name}/versions/${server_version}"; then
+            mcp_already_published=true
+          fi
+
+          should_publish_npm=false
+          if [ "$npm_already_published" = false ]; then
+            should_publish_npm=true
+          fi
+
+          should_publish_mcp=false
+          if [ "$mcp_already_published" = false ]; then
+            should_publish_mcp=true
+          fi
+
+          should_publish_any=false
+          if [ "$should_publish_npm" = true ] || [ "$should_publish_mcp" = true ]; then
+            should_publish_any=true
+          fi
+
+          {
+            echo "package_name=$package_name"
+            echo "package_version=$package_version"
+            echo "server_name=$server_name"
+            echo "server_version=$server_version"
+            echo "npm_already_published=$npm_already_published"
+            echo "mcp_already_published=$mcp_already_published"
+            echo "should_publish_npm=$should_publish_npm"
+            echo "should_publish_mcp=$should_publish_mcp"
+            echo "should_publish_any=$should_publish_any"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Package: ${package_name}@${package_version}"
+          echo "MCP server: ${server_name}@${server_version}"
+          echo "npm already published: ${npm_already_published}"
+          echo "MCP Registry already published: ${mcp_already_published}"
+          echo "Should publish npm: ${should_publish_npm}"
+          echo "Should publish MCP Registry: ${should_publish_mcp}"
+
+      - name: Install dependencies
+        if: steps.version.outputs.should_publish_any == 'true'
+        run: npm ci
+
+      - name: Test
+        if: steps.version.outputs.should_publish_any == 'true'
+        run: npm test
+
+      - name: Check package contents
+        if: steps.version.outputs.should_publish_npm == 'true'
+        run: npm pack --dry-run
+
+      - name: Check npm version
+        if: steps.version.outputs.should_publish_npm == 'true'
+        run: npm --version
+
+      - name: Publish to npm
+        if: steps.version.outputs.should_publish_npm == 'true'
+        run: npm publish --access public
+
+      - name: Verify npm package is available
+        if: steps.version.outputs.should_publish_mcp == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          package="${{ steps.version.outputs.package_name }}@${{ steps.version.outputs.package_version }}"
+          for attempt in {1..12}; do
+            if npm view "$package" version >/dev/null 2>&1; then
+              echo "$package is available on npm."
+              exit 0
+            fi
+            echo "Waiting for $package to become available on npm..."
+            sleep 10
+          done
+          echo "$package is not available on npm after waiting."
+          exit 1
+
+      - name: Install mcp-publisher
+        if: steps.version.outputs.should_publish_mcp == 'true'
+        run: |
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+          chmod +x ./mcp-publisher
+
+      - name: Validate MCP registry metadata
+        if: steps.version.outputs.should_publish_mcp == 'true'
+        run: ./mcp-publisher validate
+
+      - name: Authenticate to MCP Registry
+        if: steps.version.outputs.should_publish_mcp == 'true'
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish to MCP Registry
+        if: steps.version.outputs.should_publish_mcp == 'true'
+        run: ./mcp-publisher publish

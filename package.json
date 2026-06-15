@@ -1,0 +1,57 @@
+{
+  "name": "ifc-mcp",
+  "version": "0.1.10",
+  "description": "Local MCP server for IFC/BIM workflows with generated IfcOpenShell Python in Pyodide and an IFC viewer.",
+  "type": "module",
+  "bin": {
+    "ifc-mcp": "dist/ifc-mcp.js"
+  },
+  "files": [
+    "THIRD_PARTY_NOTICES",
+    "docs/ifc-mcp-demo-thumbnail.jpg",
+    "dist/ifc-mcp.js",
+    "dist/static/viewer.html"
+  ],
+  "scripts": {
+    "build": "node scripts/build-package.mjs",
+    "prepack": "npm run build",
+    "start": "node ./bin/ifc-mcp.js",
+    "test": "node --test --test-concurrency=1 tests-node/ifc-mcp.test.mjs tests-node/mcp-tools.test.mjs"
+  },
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "ifc",
+    "ifcopenshell",
+    "ifc-viewer",
+    "pyodide",
+    "bim",
+    "building-information-modeling",
+    "openbim",
+    "bcf"
+  ],
+  "author": "Flinker GmbH",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/flinker-app/ifc-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/flinker-app/ifc-mcp/issues"
+  },
+  "homepage": "https://github.com/flinker-app/ifc-mcp#readme",
+  "mcpName": "io.github.flinker-app/ifc-mcp",
+  "engines": {
+    "node": ">=18.20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "fast-xml-parser": "^5.3.2",
+    "jszip": "^3.10.1",
+    "zod": "^4.1.13"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.1"
+  }
+}
