@@ -7,6 +7,14 @@ const root = process.cwd();
 const dist = path.join(root, "dist");
 const viewerSource = path.join(root, "src-node", "static", "viewer.html");
 const viewerTarget = path.join(dist, "static", "viewer.html");
+const external = [
+  "@modelcontextprotocol/sdk",
+  "@modelcontextprotocol/sdk/*",
+  "fast-xml-parser",
+  "jszip",
+  "zod",
+  "zod/*",
+];
 
 await fs.rm(dist, { recursive: true, force: true });
 await fs.mkdir(path.dirname(viewerTarget), { recursive: true });
@@ -21,14 +29,20 @@ await build({
   minify: true,
   sourcemap: false,
   legalComments: "none",
-  external: [
-    "@modelcontextprotocol/sdk",
-    "@modelcontextprotocol/sdk/*",
-    "fast-xml-parser",
-    "jszip",
-    "zod",
-    "zod/*",
-  ],
+  external,
+});
+
+await build({
+  entryPoints: [path.join(root, "src-node", "server.js")],
+  outfile: path.join(dist, "server.js"),
+  bundle: true,
+  platform: "node",
+  format: "esm",
+  target: "node18.20",
+  minify: true,
+  sourcemap: false,
+  legalComments: "none",
+  external,
 });
 
 await fs.writeFile(viewerTarget, await minifyViewerHtml(await fs.readFile(viewerSource, "utf8")));

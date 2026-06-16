@@ -3,6 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import * as z from "zod/v4";
 
 import { DEFAULT_COPILOT_SDK_URL } from "./constants.js";
+import { configureDesktopViewer } from "./desktop-viewer.js";
 import { executeIfcPython } from "./python-runner.js";
 import { clearViewer, loadIfcFile, openViewer, setViewerBcfState } from "./viewer.js";
 
@@ -54,10 +55,12 @@ written to the user's working directory. For IFC creation tasks, create an
 .ifc/.ifcxml/.ifczip file in output_dir so it is returned in saved_files.
 `.trim();
 
-export function createServer() {
+export function createServer({ desktopViewer = null } = {}) {
+  configureDesktopViewer(desktopViewer);
+
   const server = new McpServer({
     name: "IFC MCP",
-    version: "0.1.10",
+    version: "0.1.12",
     instructions: INSTRUCTIONS,
   });
 
@@ -168,9 +171,9 @@ export function createServer() {
   return server;
 }
 
-export async function main() {
+export async function main(options = {}) {
   const transport = new StdioServerTransport();
-  await createServer().connect(transport);
+  await createServer(options).connect(transport);
 }
 
 function jsonToolResult(value) {
