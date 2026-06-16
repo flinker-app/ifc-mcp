@@ -5,6 +5,12 @@ import { fileURLToPath } from "node:url";
 
 import { BCF_SUFFIXES, DEFAULT_VIEWER_PORT, DEFAULT_VIEWER_URL, IFC_SUFFIXES } from "./constants.js";
 import { createBcfBytes, readBcfTopics, readBcfTopicsFromBytes } from "./bcf.js";
+import {
+  applyBcfStateWithDesktopViewer,
+  clearWithDesktopViewer,
+  loadFileWithDesktopViewer,
+  openWithDesktopViewer,
+} from "./desktop-viewer.js";
 import { addDownload, getDownload, resetDownloadsForTests } from "./downloads.js";
 import { resolvePath } from "./paths.js";
 import { nowIso, tokenUrlSafe } from "./utils.js";
@@ -22,6 +28,10 @@ export async function openViewer() {
   const view = ensureActiveView();
   view.title = VIEWER_TITLE;
   view.updatedAt = nowIso();
+
+  const desktopResult = await openWithDesktopViewer({ view, activeModel: activeModel(view) });
+  if (desktopResult) return desktopResult;
+
   await ensureViewerServer();
 
   const response = viewerResponse(view, {
@@ -46,6 +56,9 @@ export async function loadIfcFile({
   view.activeModelId = model.id;
   view.updatedAt = nowIso();
 
+  const desktopResult = await loadFileWithDesktopViewer({ view, model, added });
+  if (desktopResult) return desktopResult;
+
   await ensureViewerServer();
   const response = viewerResponse(view, {
     addedModel: added,
@@ -68,6 +81,9 @@ export async function clearViewer() {
   view.bcfMetadata = null;
   view.bcfVersion += 1;
   view.updatedAt = nowIso();
+
+  const desktopResult = await clearWithDesktopViewer({ view });
+  if (desktopResult) return desktopResult;
 
   await ensureViewerServer();
   return {
@@ -123,6 +139,16 @@ export async function setViewerBcfState({
   view.bcfMetadata = bcfMetadata;
   view.bcfVersion += 1;
   view.updatedAt = nowIso();
+
+  const desktopResult = await applyBcfStateWithDesktopViewer({
+    view,
+    activeModel: targetModel,
+    bcfSource,
+    bcfBytes,
+    bcfFilename: bcfFilename || "viewpoint.bcfzip",
+    bcfTopicGuid: topicGuid(view),
+  });
+  if (desktopResult) return desktopResult;
 
   return {
     ...viewerResponse(view, {

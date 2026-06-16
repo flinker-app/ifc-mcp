@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 
 import { createBcfBytes, createBcfFile, readBcfTopics } from "../src-node/bcf.js";
+import { configureDesktopViewer } from "../src-node/desktop-viewer.js";
 import { executeIfcPython } from "../src-node/python-runner.js";
 import {
   clearViewer,
@@ -256,6 +257,70 @@ test("viewer can apply a generated BCF download URL", async () => {
   assert.equal(bcfBytes.subarray(0, 2).toString("utf8"), "PK");
 });
 
+test("desktop viewer mode launches the configured app for viewer tools", async () => {
+  resetViewerForTests();
+  const fixture = await sampleIfcFixture();
+  const created = await createBcfBytes({
+    title: "Desktop BCF",
+    selectedGlobalIds: [fixture.wallGuid],
+    isolatedGlobalIds: [fixture.wallGuid],
+    ifcFilename: path.basename(fixture.path),
+  });
+  const bcfPath = path.join(fixture.root, "desktop-view.bcfzip");
+  await fs.writeFile(bcfPath, created.bytes);
+
+  const logPath = path.join(fixture.root, "desktop-launches.ndjson");
+  const launcherPath = path.join(fixture.root, "desktop-launcher.mjs");
+  await fs.writeFile(
+    launcherPath,
+    `
+import fs from "node:fs";
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({ args }) + "\\n");
+`,
+  );
+
+  configureDesktopViewer({
+    exePath: process.execPath,
+    argsPrefix: [launcherPath],
+    clearArg: "--ifc-mcp-clear-viewer",
+    spawnEnv: process.env,
+  });
+
+  try {
+    const opened = await openViewer();
+    assert.equal(opened.desktop_viewer, true);
+    assert.equal(opened.opened_viewer, true);
+    assert.equal(opened.url, null);
+
+    const loaded = await loadIfcFile({ filePath: fixture.path });
+    assert.equal(loaded.desktop_viewer, true);
+    assert.equal(loaded.loaded_ifc_file, true);
+    assert.deepEqual(loaded.desktop_file_paths, [fixture.path]);
+
+    const updated = await setViewerBcfState({ bcfPath });
+    assert.equal(updated.desktop_viewer, true);
+    assert.equal(updated.applied_to_open_viewer, true);
+    assert.deepEqual(updated.desktop_file_paths, [fixture.path, bcfPath]);
+    assert.equal(updated.bcf_topic_guid, created.metadata.topic_guid);
+
+    const cleared = await clearViewer();
+    assert.equal(cleared.desktop_viewer, true);
+    assert.equal(cleared.cleared_viewer, true);
+
+    const launches = await waitForLaunches(logPath, 4);
+    assertLaunchesInclude(launches, [
+      [],
+      [fixture.path],
+      [fixture.path, bcfPath],
+      ["--ifc-mcp-clear-viewer"],
+    ]);
+  } finally {
+    configureDesktopViewer(null);
+    resetViewerForTests();
+  }
+});
+
 async function sampleIfcFixture() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "ifc-mcp-node-"));
   const source = path.join(repoRoot, "examples", "sample.ifc");
@@ -319,4 +384,30 @@ async function jsonFrom(url) {
   const response = await fetch(url);
   assert.equal(response.ok, true);
   return response.json();
+}
+
+async function waitForLaunches(logPath, expectedCount) {
+  const started = Date.now();
+  while (Date.now() - started < 5000) {
+    try {
+      const lines = (await fs.readFile(logPath, "utf8")).trim().split(/\r?\n/).filter(Boolean);
+      if (lines.length >= expectedCount) {
+        return lines.map((line) => JSON.parse(line));
+      }
+    } catch {
+      // Wait for the detached test launcher to write its first line.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`Timed out waiting for ${expectedCount} desktop launches.`);
+}
+
+function assertLaunchesInclude(launches, expectedArgsList) {
+  const remaining = launches.map((launch) => JSON.stringify(launch.args));
+  for (const expectedArgs of expectedArgsList) {
+    const expected = JSON.stringify(expectedArgs);
+    const index = remaining.indexOf(expected);
+    assert.notEqual(index, -1, `Missing desktop launch args: ${expected}`);
+    remaining.splice(index, 1);
+  }
 }
