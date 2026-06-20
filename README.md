@@ -10,7 +10,7 @@ IFC MCP when it needs the IFC tools and sends your request to the local server.
 IFC MCP reads IFC files locally, runs the needed IFC logic in a local Pyodide
 runtime with IfcOpenShell, and returns the answer to the chat.
 
-[![Watch IFC MCP with Claude demo on YouTube](https://cdn.jsdelivr.net/npm/ifc-mcp@0.1.12/docs/ifc-mcp-demo-thumbnail.jpg)](https://youtu.be/Y4IgtZVmUeE)
+[![Watch IFC MCP with Claude demo on YouTube](https://cdn.jsdelivr.net/npm/ifc-mcp@0.1.13/docs/ifc-mcp-demo-thumbnail.jpg)](https://youtu.be/Y4IgtZVmUeE)
 
 Good example prompts:
 
@@ -223,6 +223,36 @@ Restart the MCP client after saving the config.
 For more detail, see the [Model Context Protocol docs](https://modelcontextprotocol.io/docs/getting-started/intro).
 
 </details>
+
+## Use Your Own Viewer
+
+If your app already has an IFC viewer, you can reuse IFC MCP's normal tool
+interface and apply viewer actions in your app instead of opening the default
+local viewer. The MCP client still calls tools like `show-ifc-file` and
+`set-bcf-view`; your app only defines what those viewer tools do.
+
+```js
+import { createServer } from "ifc-mcp";
+
+const server = createServer({
+  viewer: {
+    "show-ifc-file": async ({ file_path }) => {
+      return loadIfcIntoThisViewer(file_path);
+    },
+
+    "set-bcf-view": async ({ bcf_path }) => {
+      return applyBcfToThisViewer(bcf_path);
+    },
+
+    "clear-ifc-viewer": async () => {
+      return clearThisViewer();
+    },
+  },
+});
+```
+
+The callback names and argument names match the MCP tool names and schemas, so
+there is no second naming system to learn.
 
 ## Local Development
 

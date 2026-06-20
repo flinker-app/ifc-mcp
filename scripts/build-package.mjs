@@ -45,6 +45,19 @@ await build({
   external,
 });
 
+await build({
+  entryPoints: [path.join(root, "src-node", "browser.js")],
+  outfile: path.join(dist, "browser.js"),
+  bundle: true,
+  platform: "browser",
+  format: "esm",
+  target: "es2022",
+  minify: true,
+  sourcemap: false,
+  legalComments: "none",
+  external: ["zod", "zod/*"],
+});
+
 await fs.writeFile(viewerTarget, await minifyViewerHtml(await fs.readFile(viewerSource, "utf8")));
 
 async function minifyViewerHtml(html) {
