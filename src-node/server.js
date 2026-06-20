@@ -3,7 +3,6 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 
 import { createDefaultIfcMcpToolHandlers } from "./default-handlers.js";
 import { createIfcMcpHostHandlers } from "./host-handlers.js";
-import { INSTRUCTIONS } from "./tool-definitions.js";
 import { createIfcMcpToolHost } from "./tool-host.js";
 import { configureDesktopViewer } from "./desktop-viewer.js";
 
@@ -29,8 +28,7 @@ export function createServer({
 
   const server = new McpServer({
     name: "IFC MCP",
-    version: "0.1.13",
-    instructions: INSTRUCTIONS,
+    version: "0.1.14",
   });
 
   for (const tool of toolHost.tools) {

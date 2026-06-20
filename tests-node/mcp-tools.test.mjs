@@ -9,7 +9,7 @@ import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
-import { createBcfFile } from "../src-node/bcf.js";
+import { createBcfFile, readBcfTopicsFromBytes } from "../src-node/bcf.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const sampleIfc = path.join(repoRoot, "examples", "sample.ifc");
@@ -61,6 +61,11 @@ test("MCP run-python schema forces file_path and explains Pyodide host-path rule
     assert.deepEqual(Object.keys(clearViewer.inputSchema.properties).sort(), []);
     assert.match(clearViewer.description, /removing all loaded IFC files/i);
     assert.match(setView.description, /BCF\/BCFZIP viewpoint file/);
+    assert.match(setView.description, /saved_files\[0\]\.url/);
+    assert.match(setView.description, /```python[\s\S]*view\.bcfzip[\s\S]*```/);
+    assert.match(setView.description, /from bcf\.v3\.bcfxml import BcfXml/);
+    assert.match(setView.description, /VisualizationInfoHandler/);
+    assert.doesNotMatch(setView.description, /from zipfile import|ZipFile\(/);
     assert.match(setView.inputSchema.properties.bcf_path.description, /generated BCF download URL/);
   });
 });
@@ -169,6 +174,52 @@ result = {
     assert.equal(output.result.schema, "IFC4");
     assert.equal(typeof output.result.issue_count, "number");
     assert.equal(output.stderr, "");
+  });
+});
+
+test("set-bcf-view Python example generates and applies a valid BCFZIP", async () => {
+  await withMcpClient(async (client) => {
+    const tools = await client.listTools();
+    const setView = tools.tools.find((tool) => tool.name === "set-bcf-view");
+    assert.ok(setView, "set-bcf-view tool should be registered");
+
+    const output = await callRunPython(client, {
+      file_path: sampleIfc,
+      timeout_seconds: 180,
+      code: extractPythonExample(setView.description),
+    });
+
+    assert.equal(output.ok, true);
+    assert.match(output.result.bcf_path, /view\.bcfzip$/);
+    const bcfFile = output.saved_files.find((file) => file.name === "view.bcfzip");
+    assert.ok(bcfFile?.url, "Python example should return view.bcfzip in saved_files");
+
+    const response = await fetch(bcfFile.url);
+    assert.equal(response.ok, true);
+    const bcfBytes = Buffer.from(await response.arrayBuffer());
+    assert.equal(bcfBytes.subarray(0, 2).toString("utf8"), "PK");
+
+    const parsed = await readBcfTopicsFromBytes(bcfBytes, { bcfPath: bcfFile.url });
+    assert.equal(parsed.topic_count, 1);
+    assert.equal(parsed.topics[0].title, "Review wall");
+    assert.deepEqual(parsed.topics[0].viewpoints[0].selected_global_ids, [
+      "0000000000000000000005",
+    ]);
+    assert.equal(parsed.topics[0].viewpoints[0].visibility_default, "false");
+    assert.deepEqual(parsed.topics[0].viewpoints[0].visibility_exceptions, [
+      "0000000000000000000005",
+    ]);
+
+    await callJsonTool(client, "show-ifc-file", {
+      file_path: sampleIfc,
+    });
+    const updated = await callJsonTool(client, "set-bcf-view", {
+      bcf_path: bcfFile.url,
+    });
+
+    assert.equal(updated.applied_to_open_viewer, true);
+    assert.equal(updated.has_bcf, true);
+    assert.equal(updated.bcf_topic_guid, parsed.topics[0].guid);
   });
 });
 
@@ -302,4 +353,10 @@ async function callJsonTool(client, name, args) {
   );
   assert.equal(result.content?.[0]?.type, "text");
   return JSON.parse(result.content[0].text);
+}
+
+function extractPythonExample(description) {
+  const match = String(description || "").match(/```python\n([\s\S]*?)\n```/);
+  assert.ok(match, "set-bcf-view description should include a Python code block");
+  return match[1];
 }
