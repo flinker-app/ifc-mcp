@@ -3,12 +3,12 @@
   "name": "io.github.flinker-app/ifc-mcp",
   "title": "IFC MCP",
   "description": "Local IFC/BIM MCP server with IfcOpenShell Python in Pyodide and an IFC viewer.",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "ifc-mcp",
-      "version": "0.1.12",
+      "version": "0.1.13",
       "transport": {
         "type": "stdio"
       }
