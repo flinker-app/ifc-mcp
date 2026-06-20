@@ -149,7 +149,7 @@ export async function readBcfTopicsFromBytes(bytes, { bcfPath = null, maxTopics 
       viewpoints: [],
     };
 
-    const viewpointRefs = asArray(markup?.Markup?.Viewpoints?.ViewPoint);
+    const viewpointRefs = asArray(topicNode.Viewpoints?.ViewPoint || markup?.Markup?.Viewpoints?.ViewPoint);
     for (const viewpointRef of viewpointRefs) {
       const viewpointFile = textValue(viewpointRef?.Viewpoint);
       if (!viewpointFile) {

@@ -2,28 +2,10 @@ import * as z from "zod/v4";
 
 import { DEFAULT_COPILOT_SDK_URL } from "./constants.js";
 
-export const INSTRUCTIONS = `
-Use this server for Industry Foundation Classes (IFC) and BCF coordination workflows.
-For any IFC data task, including creating new IFC files, call run Python. This
-is the single Python execution entry point.
-
-Viewer workflow: open-ifc-viewer only opens or shows the local IFC viewer and
-returns its stable viewer URL. show-ifc-file adds IFC files to that viewer from
-either local IFC paths or generated saved_files download URLs returned by run
-Python. A single viewer can contain multiple IFC files. set-bcf-view only
-changes the viewer state by applying a BCF viewpoint file. clear-ifc-viewer
-removes all loaded IFC files and BCF state from the same viewer.
-After open-ifc-viewer or show-ifc-file returns, use the returned URL as the
-viewer address. If the MCP client can open links, open that local URL. If it
-cannot, tell the user to open the URL in a browser or webview available in their
-client.
-Do not use browser automation to click/select elements in the viewer.
-`.trim();
-
 export const RUN_PYTHON_DESCRIPTION = `
 Execute LLM-created Python in the Flinker Copilot SDK Node/Pyodide IFC runtime.
 Use this tool for IFC inspection, validation, reports, exports, and creating
-new IFC files.
+new IFC files. This is the Python execution entry point for IFC data tasks.
 
 Runtime context: the default SDK module is ${DEFAULT_COPILOT_SDK_URL}. It uses
 the bundled Pyodide 0.28.2 runtime. The default SDK package set includes
@@ -61,6 +43,39 @@ const showIfcFilePathDescription =
 
 const bcfPathDescription =
   "Local BCF/BCFZIP file path, or a generated BCF download URL from run Python saved_files, to apply in the viewer.";
+
+export const SET_BCF_VIEW_DESCRIPTION = `
+Set the view state in the already-open local IFC viewer by applying a BCF/BCFZIP viewpoint file.
+Pass either a local BCF/BCFZIP file path or a generated BCF download URL from run Python saved_files.
+This tool does not show/load IFC files; use show-ifc-file for that.
+It should not open a new browser tab and should not use browser automation.
+To generate a BCFZIP with run-python, write it to output_dir, then call set-bcf-view with saved_files[0].url:
+\`\`\`python
+from uuid import uuid4
+from bcf.v3 import model as mdl
+from bcf.v3.bcfxml import BcfXml
+from bcf.v3.visinfo import VisualizationInfoHandler
+
+gid = model.by_type("IfcWall")[0].GlobalId
+component = mdl.Component(ifc_guid=gid)
+visinfo = mdl.VisualizationInfo(
+    guid=str(uuid4()),
+    components=mdl.Components(
+        selection=mdl.ComponentSelection(component=[component]),
+        visibility=mdl.ComponentVisibility(
+            default_visibility=False,
+            exceptions=mdl.ComponentVisibilityExceptions(component=[component]),
+        ),
+    ),
+)
+bcf = BcfXml.create_new(project_name="IFC MCP")
+topic = bcf.add_topic("Review wall", "Review wall", "ifc-mcp", topic_type="Issue", topic_status="Open")
+topic.add_visinfo_handler(VisualizationInfoHandler(visinfo))
+bcf_path = output_dir / "view.bcfzip"
+bcf.save(bcf_path)
+result = {"bcf_path": str(bcf_path)}
+\`\`\`
+`.trim();
 
 const emptyObjectJsonSchema = {
   type: "object",
@@ -104,7 +119,7 @@ export const IFC_MCP_TOOL_DEFINITIONS = [
     name: "open-ifc-viewer",
     title: "open IFC viewer",
     description:
-      "Open or show the local IFC viewer and return its stable viewer URL. This tool does not load IFC files and does not change selection/isolation state. After this tool returns, use the returned URL as the viewer address. If the client can open links, open that local URL; otherwise tell the user to open the URL in a browser or webview. Use show-ifc-file to show IFC files. Use set-bcf-view to apply a BCF viewpoint file.",
+      "Open or show the local IFC viewer and return its stable viewer URL. This tool does not load IFC files and does not change selection/isolation state. After this tool returns, use the returned URL as the viewer address. If the client can open links, open that local URL; otherwise tell the user to open the URL in a browser or webview. Use show-ifc-file to show IFC files. Use set-bcf-view to apply a BCF viewpoint file. Do not use browser automation to click or select elements in the viewer.",
     schema: z.object({}),
     inputSchema: emptyObjectJsonSchema,
   },
@@ -112,7 +127,7 @@ export const IFC_MCP_TOOL_DEFINITIONS = [
     name: "show-ifc-file",
     title: "show IFC file",
     description:
-      "Show one IFC file in the already-open local IFC viewer. Pass either a local IFC/IFCXML/IFCZIP file path or a generated IFC download URL from run Python saved_files. Use this for IFC model display only. Repeated calls add multiple IFC files to the same viewer. Use open-ifc-viewer to open the viewer and set-bcf-view to apply a BCF viewpoint file.",
+      "Show one IFC file in the already-open local IFC viewer. Pass either a local IFC/IFCXML/IFCZIP file path or a generated IFC download URL from run Python saved_files. Use this for IFC model display only. Repeated calls add multiple IFC files to the same viewer. Returns the same stable viewer URL; after this tool returns, use that URL as the viewer address. Use open-ifc-viewer to open the viewer and set-bcf-view to apply a BCF viewpoint file.",
     schema: z.object({
       file_path: z.string().describe(showIfcFilePathDescription),
     }),
@@ -139,8 +154,7 @@ export const IFC_MCP_TOOL_DEFINITIONS = [
   {
     name: "set-bcf-view",
     title: "set BCF view",
-    description:
-      "Set the view state in the already-open local IFC viewer by applying a BCF/BCFZIP viewpoint file. Pass either a local BCF/BCFZIP file path or a generated BCF download URL from run Python saved_files. This tool does not show/load IFC files; use show-ifc-file for that. It should not open a new browser tab and should not use browser automation.",
+    description: SET_BCF_VIEW_DESCRIPTION,
     schema: z.object({
       bcf_path: z.string().describe(bcfPathDescription),
     }),
