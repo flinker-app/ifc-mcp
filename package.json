@@ -1,11 +1,12 @@
 {
   "name": "ifc-mcp",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "Local MCP server for IFC/BIM workflows with generated IfcOpenShell Python in Pyodide and an IFC viewer.",
   "type": "module",
   "main": "dist/server.js",
   "exports": {
-    ".": "./dist/server.js"
+    ".": "./dist/server.js",
+    "./browser": "./dist/browser.js"
   },
   "bin": {
     "ifc-mcp": "dist/ifc-mcp.js"
@@ -13,6 +14,7 @@
   "files": [
     "THIRD_PARTY_NOTICES",
     "docs/ifc-mcp-demo-thumbnail.jpg",
+    "dist/browser.js",
     "dist/ifc-mcp.js",
     "dist/server.js",
     "dist/static/viewer.html"
@@ -21,7 +23,7 @@
     "build": "node scripts/build-package.mjs",
     "prepack": "npm run build",
     "start": "node ./bin/ifc-mcp.js",
-    "test": "node --test --test-concurrency=1 tests-node/ifc-mcp.test.mjs tests-node/mcp-tools.test.mjs"
+    "test": "node --test --test-concurrency=1 tests-node/ifc-mcp.test.mjs tests-node/mcp-tools.test.mjs tests-node/browser-host.test.mjs"
   },
   "keywords": [
     "mcp",
