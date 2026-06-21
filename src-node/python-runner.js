@@ -18,7 +18,7 @@ const sdkModuleCache = new Map();
 
 export async function executeIfcPython({
   code,
-  filePath = null,
+  files = [],
   timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
   workingDirectory = null,
   maxOutputChars = DEFAULT_MAX_OUTPUT_CHARS,
@@ -33,14 +33,12 @@ export async function executeIfcPython({
   }
 
   const cwd = resolveWorkingDirectory(workingDirectory);
-  const resolvedFile = filePath
-    ? resolvePath(filePath, { suffixes: IFC_SUFFIXES, description: "IFC file" })
-    : null;
+  const inputFiles = resolveInputFiles(files);
 
   const timeout = timeoutAfter(timeoutSeconds);
   const started = runSdk({
     code,
-    filePath: resolvedFile,
+    inputFiles,
     sdkUrl,
   });
 
@@ -56,7 +54,7 @@ export async function executeIfcPython({
       result: output.result,
       stdout: trimText(streams.stdout, maxOutputChars),
       stderr: trimText(streams.stderr, maxOutputChars),
-      file_path: resolvedFile,
+      uploaded_files: output.filesUsed || inputFileMetas(inputFiles),
       working_directory: cwd,
       saved_files: output.savedFiles || [],
       runtime_status: output.runtimeStatus || null,
@@ -77,7 +75,7 @@ export async function executeIfcPython({
         result: null,
         stdout: "",
         stderr: "",
-        file_path: resolvedFile,
+        uploaded_files: inputFileMetas(inputFiles),
         working_directory: cwd,
         runner: "node_copilot_cdn",
         sdk_url: sdkUrl,
@@ -93,7 +91,7 @@ export async function executeIfcPython({
       result: null,
       stdout: trimText(streams.stdout, maxOutputChars),
       stderr: trimText(streams.stderr, maxOutputChars),
-      file_path: resolvedFile,
+      uploaded_files: inputFileMetas(inputFiles),
       working_directory: cwd,
       saved_files: [],
       runtime_status: "error",
@@ -104,23 +102,11 @@ export async function executeIfcPython({
   }
 }
 
-async function runSdk({ code, filePath, sdkUrl }) {
+async function runSdk({ code, inputFiles, sdkUrl }) {
   const sdk = await loadSdkModule(sdkUrl);
-  const files = [];
-  if (filePath) {
-    const fileBytes = await fs.readFile(filePath);
-    files.push({
-      name: path.basename(filePath),
-      buffer: fileBytes.buffer.slice(
-        fileBytes.byteOffset,
-        fileBytes.byteOffset + fileBytes.byteLength,
-      ),
-      size: fileBytes.byteLength,
-      type: "application/octet-stream",
-    });
-  }
+  const files = await buildSdkInputFiles(inputFiles);
 
-  const python = wrapUserCode(code, filePath ? path.basename(filePath) : null);
+  const python = code;
   if (typeof sdk.runPythonInWorker === "function") {
     return runWithWorker(sdk, {
       python,
@@ -151,6 +137,9 @@ async function runWithWorker(sdk, { python, files, requestId }) {
   if (typeof output.runtimeStatus !== "string") {
     output.runtimeStatus = "completed";
   }
+  if (!Object.hasOwn(output, "result") && typeof rawResult !== "undefined") {
+    output.result = rawResult;
+  }
   const uploadedFiles = uploadedFileMetas(files);
   output.file = uploadedFiles[0] || null;
   output.filesUsed = uploadedFiles;
@@ -176,6 +165,9 @@ async function runWithCopilot(sdk, { python, files, requestId }) {
     requestId,
   });
   const output = run && typeof run.output === "object" ? run.output : {};
+  const uploadedFiles = uploadedFileMetas(files);
+  output.file = uploadedFiles[0] || null;
+  output.filesUsed = uploadedFiles;
   output.savedFiles = await exposeSdkFiles(Array.isArray(output.files) ? output.files : []);
   output.files = output.savedFiles;
   return output;
@@ -220,6 +212,62 @@ function assertDirectory(value, description) {
     throw new Error(`${description} must be a directory: ${value}`);
   }
   return value;
+}
+
+function resolveInputFiles(files) {
+  if (files == null) {
+    return [];
+  }
+  if (!Array.isArray(files)) {
+    throw new Error("files must be an array of local IFC/IFCXML/IFCZIP paths");
+  }
+
+  const usedNames = new Set();
+  return files.map((file, index) => {
+    if (!file || typeof file !== "string") {
+      throw new Error(`files[${index}] must be a non-empty string`);
+    }
+    const sourcePath = resolvePath(file, {
+      suffixes: IFC_SUFFIXES,
+      description: `files[${index}]`,
+    });
+    return {
+      path: sourcePath,
+      name: uniqueInputFileName(path.basename(sourcePath), usedNames, index + 1),
+    };
+  });
+}
+
+async function buildSdkInputFiles(inputFiles) {
+  const files = [];
+  for (const inputFile of inputFiles) {
+    const fileBytes = await fs.readFile(inputFile.path);
+    files.push({
+      name: inputFile.name,
+      buffer: fileBytes.buffer.slice(
+        fileBytes.byteOffset,
+        fileBytes.byteOffset + fileBytes.byteLength,
+      ),
+      size: fileBytes.byteLength,
+      type: "application/octet-stream",
+      sourcePath: inputFile.path,
+    });
+  }
+  return files;
+}
+
+function uniqueInputFileName(baseName, usedNames, fallbackIndex) {
+  const safeName = safeLeaf(baseName, `input-${fallbackIndex}.ifc`);
+  const ext = path.extname(safeName);
+  const stem = ext ? safeName.slice(0, -ext.length) : safeName;
+  let name = safeName;
+  let attempt = 1;
+  while (usedNames.has(name)) {
+    name = `${stem}-${attempt}${ext}`;
+    attempt += 1;
+  }
+  usedNames.add(name);
+  return name;
 }
 
 function extractStreams(output) {
@@ -372,8 +420,17 @@ function safeLeaf(value, fallback) {
 function uploadedFileMetas(files) {
   return files.map((file) => ({
     name: file.name,
+    path: file.sourcePath || file.path || null,
     size: file.size,
     type: file.type,
+  }));
+}
+
+function inputFileMetas(files) {
+  return files.map((file) => ({
+    name: file.name,
+    path: file.path,
+    type: "application/octet-stream",
   }));
 }
 
@@ -390,95 +447,6 @@ function timeoutAfter(timeoutSeconds) {
     promise,
     cancel: () => clearTimeout(handle),
   };
-}
-
-function wrapUserCode(code, ifcFilename) {
-  const ifcFilenameLiteral = ifcFilename == null ? "None" : JSON.stringify(String(ifcFilename));
-  return `
-from __future__ import annotations
-
-import json
-from pathlib import Path
-from typing import Any
-
-import ifcopenshell
-import ifcopenshell.util.element as element_util
-import ifcopenshell.validate as ifc_validate
-
-output_dir = Path("/home/pyodide")
-_ifc_file_name = ${ifcFilenameLiteral}
-
-
-def _resolve_ifc_file_path(file_name: str | None) -> str | None:
-    if not file_name:
-        return None
-    candidates = [
-        Path(file_name),
-        output_dir / file_name,
-        Path("/") / file_name,
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return str(candidate)
-    return file_name
-
-
-ifc_file_path = _resolve_ifc_file_path(_ifc_file_name)
-model = ifcopenshell.open(ifc_file_path) if ifc_file_path else None
-result = None
-
-
-def resolve_path(path: str, *, must_exist: bool = True, suffixes=None, description: str = "path") -> Path:
-    candidate = Path(path).expanduser()
-    if suffixes:
-        suffix_set = {str(suffix).lower() for suffix in suffixes}
-        if candidate.suffix.lower() not in suffix_set:
-            expected = ", ".join(sorted(suffix_set))
-            raise ValueError(f"{description} must have one of these suffixes: {expected}")
-    if must_exist and not candidate.exists():
-        raise FileNotFoundError(f"{description} does not exist: {candidate}")
-    return candidate
-
-
-def dump(value: Any) -> None:
-    print(json.dumps(_jsonable(value), indent=2, ensure_ascii=False))
-
-
-def _jsonable(value: Any, depth: int = 0) -> Any:
-    if depth > 10:
-        return str(value)
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if hasattr(value, "is_a") and callable(value.is_a):
-        return _entity_ref(value)
-    if isinstance(value, dict):
-        return {str(key): _jsonable(item, depth + 1) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set)):
-        return [_jsonable(item, depth + 1) for item in value]
-    if hasattr(value, "tolist"):
-        try:
-            return _jsonable(value.tolist(), depth + 1)
-        except Exception:
-            pass
-    return str(value)
-
-
-def _entity_ref(entity: Any) -> dict[str, Any]:
-    data = {"step_id": entity.id(), "type": entity.is_a()}
-    for name in ("GlobalId", "Name", "Description", "ObjectType", "Tag", "PredefinedType"):
-        try:
-            value = getattr(entity, name)
-        except Exception:
-            continue
-        if value not in (None, ""):
-            data[name] = _jsonable(value)
-    return data
-
-
-${code}
-
-__assistant_result__ = {"result": _jsonable(result)}
-`.trim();
 }
 
 function fsRealpathOrResolve(value) {

@@ -5,12 +5,12 @@ export function createDefaultIfcMcpToolHandlers() {
   return {
     "run-python": async ({
       code,
-      file_path,
+      files = [],
       timeout_seconds = 120,
     }) => {
       const executed = await executeIfcPython({
         code,
-        filePath: file_path || null,
+        files,
         timeoutSeconds: timeout_seconds,
       });
       return publicPythonResult(executed);
@@ -39,6 +39,6 @@ export function publicPythonResult(value) {
     stdout: value?.stdout || "",
     stderr: value?.stderr || "",
     saved_files: Array.isArray(value?.saved_files) ? value.saved_files : [],
-    file_path: value?.file_path || null,
+    uploaded_files: Array.isArray(value?.uploaded_files) ? value.uploaded_files : [],
   };
 }

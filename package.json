@@ -1,6 +1,6 @@
 {
   "name": "ifc-mcp",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "description": "Local MCP server for IFC/BIM workflows with generated IfcOpenShell Python in Pyodide and an IFC viewer.",
   "type": "module",
   "main": "dist/server.js",

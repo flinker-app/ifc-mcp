@@ -24,6 +24,10 @@ test("run Python executes generated code once", async () => {
   const executed = await executeIfcPython({
     code: `
 print("done")
+import ifcopenshell
+import ifcopenshell.util.element as element_util
+
+model = ifcopenshell.open("sample.ifc")
 result = {
     "schema": model.schema,
     "walls": [
@@ -32,7 +36,7 @@ result = {
     ],
 }
 `,
-    filePath: fixture.path,
+    files: [fixture.path],
     workingDirectory: fixture.root,
     timeoutSeconds: 60,
     sdkUrl: await fakeCopilotSdkUrl(fixture.root),
@@ -43,6 +47,8 @@ result = {
   assert.equal(executed.result.schema, "IFC4");
   assert.equal(executed.result.walls[0].GlobalId, fixture.wallGuid);
   assert.equal(executed.result.walls[0].psets.Pset_WallCommon.FireRating, "EI60");
+  assert.deepEqual(executed.uploaded_files.map((file) => file.name), ["sample.ifc"]);
+  assert.equal(executed.uploaded_files[0].path, fixture.path);
   assert.equal(executed.stdout, "done\n");
 });
 
@@ -50,7 +56,7 @@ test("run Python reports errors", async () => {
   const fixture = await sampleIfcFixture();
   const executed = await executeIfcPython({
     code: 'raise RuntimeError("boom")',
-    filePath: fixture.path,
+    files: [fixture.path],
     workingDirectory: fixture.root,
     timeoutSeconds: 60,
     sdkUrl: await fakeCopilotSdkUrl(fixture.root),
@@ -65,7 +71,7 @@ test("run Python saves SDK output files", async () => {
   const fixture = await sampleIfcFixture();
   const executed = await executeIfcPython({
     code: 'result = {"make_saved_file": True}  # make_saved_file',
-    filePath: fixture.path,
+    files: [fixture.path],
     workingDirectory: fixture.root,
     timeoutSeconds: 60,
     sdkUrl: await fakeCopilotSdkUrl(fixture.root),
@@ -86,13 +92,14 @@ test("run Python saves SDK output files", async () => {
 test("run Python works without an IFC file", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "ifc-mcp-node-"));
   const executed = await executeIfcPython({
-    code: 'result = {"model_is_none": model is None}',
+    code: 'print("ok")',
     workingDirectory: root,
     timeoutSeconds: 60,
     sdkUrl: await fakeCopilotSdkUrl(root),
   });
 
   assert.equal(executed.ok, true);
+  assert.equal(executed.uploaded_files.length, 0);
   assert.equal(executed.stderr, "");
 });
 

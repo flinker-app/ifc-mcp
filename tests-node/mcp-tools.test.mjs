@@ -15,7 +15,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const sampleIfc = path.join(repoRoot, "examples", "sample.ifc");
 const snowdonIfc = process.env.SNOWDON_IFC_PATH || "";
 
-test("MCP run-python schema forces file_path and explains Pyodide host-path rules", async () => {
+test("MCP run-python schema uses plural files and explains file inputs", async () => {
   await withMcpClient(async (client) => {
     const tools = await client.listTools();
     const runPython = tools.tools.find((tool) => tool.name === "run-python");
@@ -34,12 +34,13 @@ test("MCP run-python schema forces file_path and explains Pyodide host-path rule
     assert.equal(tools.tools.some((tool) => tool.name === "set-ifc-view"), false);
     assert.equal(tools.tools.some((tool) => tool.name === "load-ifc-file"), false);
     assert.equal(tools.tools.some((tool) => tool.name === "update-ifc-viewer"), false);
-    assert.deepEqual(runPython.inputSchema.required, ["code", "file_path"]);
-    assert.match(runPython.description, /Pyodide cannot access[\s\S]*host filesystem paths/);
+    assert.deepEqual(runPython.inputSchema.required, ["code"]);
+    assert.match(runPython.description, /desktop Node server[\s\S]*browser-defined paths/i);
     assert.match(runPython.description, /Pyodide 0\.28\.2/);
     assert.match(runPython.description, /ifcopenshell/);
-    assert.match(runPython.inputSchema.properties.code.description, /use the preloaded model variable|opened as model/i);
-    assert.match(runPython.inputSchema.properties.file_path.description, /Required argument/);
+    assert.equal("file_path" in runPython.inputSchema.properties, false);
+    assert.match(runPython.inputSchema.properties.code.description, /ifcopenshell\.open\("model\.ifc"\)/i);
+    assert.match(runPython.inputSchema.properties.files.description, /Desktop hosts[\s\S]*browser hosts/i);
     assert.equal("working_directory" in runPython.inputSchema.properties, false);
     assert.equal("max_output_chars" in runPython.inputSchema.properties, false);
     assert.match(openViewer.description, /browser or webview/);
@@ -70,13 +71,26 @@ test("MCP run-python schema forces file_path and explains Pyodide host-path rule
   });
 });
 
-test("MCP run-python rejects calls that omit file_path", async () => {
+test("MCP run-python accepts omitted files for non-file Python jobs", async () => {
+  await withMcpClient(async (client) => {
+    const output = await callRunPython(client, {
+      code: 'print("ok")',
+    });
+
+    assert.equal(output.ok, true);
+    assert.equal(output.stdout, "ok\n");
+    assert.deepEqual(output.uploaded_files, []);
+  });
+});
+
+test("MCP run-python rejects old file_path argument", async () => {
   await withMcpClient(async (client) => {
     const result = await client.callTool(
       {
         name: "run-python",
         arguments: {
-          code: 'result = {"bad": "missing file_path"}',
+          file_path: "",
+          code: 'result = {"bad": "old file_path"}',
         },
       },
       undefined,
@@ -89,68 +103,106 @@ test("MCP run-python rejects calls that omit file_path", async () => {
   });
 });
 
-test("MCP run-python accepts an empty file_path for non-file Python jobs", async () => {
-  await withMcpClient(async (client) => {
-    const output = await callRunPython(client, {
-      file_path: "",
-      code: 'result = {"model_is_none": model is None}',
-    });
-
-    assert.equal(output.ok, true);
-    assert.equal(output.result.model_is_none, true);
-    assert.equal(output.file_path, null);
-    assert.equal("sdk_output" in output, false);
-    assert.equal("working_directory" in output, false);
-    assert.equal("output_dir" in output, false);
-  });
-});
-
-test("MCP run-python uploads absolute IFC paths with spaces instead of opening host paths in Pyodide", async () => {
+test("MCP run-python mounts IFC paths with spaces for direct Python open", async () => {
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ifc mcp absolute path "));
   const ifcPath = path.join(tempRoot, "Snowdon Towers Sample Architectural_IFC2x3.ifc");
   await fs.copyFile(sampleIfc, ifcPath);
+  const ifcName = path.basename(ifcPath);
 
   await withMcpClient(async (client) => {
     const output = await callRunPython(client, {
-      file_path: ifcPath,
+      files: [ifcPath],
       timeout_seconds: 180,
       code: `
+import ifcopenshell
+import json
+
+ifc_name = ${JSON.stringify(ifcName)}
+with open(ifc_name, "rb") as handle:
+    magic = handle.read(10).decode("utf-8")
+model = ifcopenshell.open(ifc_name)
 walls = model.by_type("IfcWall")
-result = {
+print(json.dumps({
+    "mounted_name": ifc_name,
+    "magic": magic,
     "schema": model.schema,
     "wall_count": len(walls),
-    "first_wall": walls[0],
-}
+    "first_wall_global_id": walls[0].GlobalId,
+}))
 `,
     });
 
     assert.equal(output.ok, true);
-    assert.equal(output.file_path, ifcPath);
-    assert.equal(output.result.schema, "IFC4");
-    assert.equal(output.result.wall_count, 1);
+    const parsed = JSON.parse(output.stdout);
+    assert.equal(output.uploaded_files[0].path, ifcPath);
+    assert.equal(output.uploaded_files[0].name, "Snowdon Towers Sample Architectural_IFC2x3.ifc");
+    assert.equal(parsed.mounted_name, "Snowdon Towers Sample Architectural_IFC2x3.ifc");
+    assert.equal(parsed.magic, "ISO-10303-");
+    assert.equal(parsed.schema, "IFC4");
+    assert.equal(parsed.wall_count, 1);
     assert.equal("sdk_output" in output, false);
+  });
+});
+
+test("MCP run-python mounts multiple IFC files", async () => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ifc mcp multiple files "));
+  const firstPath = path.join(tempRoot, "sample.ifc");
+  const secondPath = path.join(tempRoot, "sample copy.ifc");
+  await fs.copyFile(sampleIfc, firstPath);
+  await fs.copyFile(sampleIfc, secondPath);
+  const mountedNames = [path.basename(firstPath), path.basename(secondPath)];
+
+  await withMcpClient(async (client) => {
+    const output = await callRunPython(client, {
+      files: [firstPath, secondPath],
+      timeout_seconds: 180,
+      code: `
+import ifcopenshell
+import json
+
+mounted_names = ${JSON.stringify(mountedNames)}
+models = [ifcopenshell.open(name) for name in mounted_names]
+print(json.dumps({
+    "mounted_names": mounted_names,
+    "schemas": [model.schema for model in models],
+    "wall_counts": [len(model.by_type("IfcWall")) for model in models],
+}))
+`,
+    });
+
+    assert.equal(output.ok, true);
+    const parsed = JSON.parse(output.stdout);
+    assert.deepEqual(output.uploaded_files.map((file) => file.path), [firstPath, secondPath]);
+    assert.deepEqual(parsed.mounted_names, ["sample.ifc", "sample copy.ifc"]);
+    assert.deepEqual(parsed.schemas, ["IFC4", "IFC4"]);
+    assert.deepEqual(parsed.wall_counts, [1, 1]);
   });
 });
 
 test("MCP run-python parses sample IFC through the real CDN Pyodide runtime", async () => {
   await withMcpClient(async (client) => {
     const output = await callRunPython(client, {
-      file_path: sampleIfc,
+      files: [sampleIfc],
       timeout_seconds: 180,
       code: `
+import ifcopenshell
+import json
+
+model = ifcopenshell.open("sample.ifc")
 walls = model.by_type("IfcWall")
-result = {
+print(json.dumps({
     "schema": model.schema,
     "wall_count": len(walls),
     "first_wall_global_id": walls[0].GlobalId if walls else None,
-}
+}))
 `,
     });
 
     assert.equal(output.ok, true);
-    assert.equal(output.result.schema, "IFC4");
-    assert.equal(output.result.wall_count, 1);
-    assert.equal(output.result.first_wall_global_id, "0000000000000000000005");
+    const parsed = JSON.parse(output.stdout);
+    assert.equal(parsed.schema, "IFC4");
+    assert.equal(parsed.wall_count, 1);
+    assert.equal(parsed.first_wall_global_id, "0000000000000000000005");
     assert.equal(output.stderr, "");
   });
 });
@@ -158,21 +210,27 @@ result = {
 test("MCP run-python validates sample IFC through the real CDN Pyodide runtime", async () => {
   await withMcpClient(async (client) => {
     const output = await callRunPython(client, {
-      file_path: sampleIfc,
+      files: [sampleIfc],
       timeout_seconds: 180,
       code: `
+import ifcopenshell
+import ifcopenshell.validate as ifc_validate
+import json
+
+model = ifcopenshell.open("sample.ifc")
 logger = ifc_validate.json_logger()
-ifc_validate.validate(ifc_file_path, logger)
-result = {
+ifc_validate.validate("sample.ifc", logger)
+print(json.dumps({
     "schema": model.schema,
     "issue_count": len(logger.statements),
-}
+}))
 `,
     });
 
     assert.equal(output.ok, true);
-    assert.equal(output.result.schema, "IFC4");
-    assert.equal(typeof output.result.issue_count, "number");
+    const parsed = JSON.parse(output.stdout);
+    assert.equal(parsed.schema, "IFC4");
+    assert.equal(typeof parsed.issue_count, "number");
     assert.equal(output.stderr, "");
   });
 });
@@ -184,13 +242,13 @@ test("set-bcf-view Python example generates and applies a valid BCFZIP", async (
     assert.ok(setView, "set-bcf-view tool should be registered");
 
     const output = await callRunPython(client, {
-      file_path: sampleIfc,
+      files: [sampleIfc],
       timeout_seconds: 180,
       code: extractPythonExample(setView.description),
     });
 
     assert.equal(output.ok, true);
-    assert.match(output.result.bcf_path, /view\.bcfzip$/);
+    assert.match(output.stdout, /view\.bcfzip/);
     const bcfFile = output.saved_files.find((file) => file.name === "view.bcfzip");
     assert.ok(bcfFile?.url, "Python example should return view.bcfzip in saved_files");
 
@@ -233,27 +291,33 @@ test(
   },
   async () => {
     await withMcpClient(async (client) => {
+      const snowdonName = path.basename(snowdonIfc);
       const output = await callRunPython(client, {
-        file_path: snowdonIfc,
+        files: [snowdonIfc],
         timeout_seconds: 600,
         code: `
+import ifcopenshell
+import json
+
+model = ifcopenshell.open(${JSON.stringify(snowdonName)})
 counts = {
     "IfcWall": len(model.by_type("IfcWall")),
     "IfcWallStandardCase": len(model.by_type("IfcWallStandardCase")),
 }
-result = {
+print(json.dumps({
     "schema": model.schema,
     "wall_count": counts["IfcWall"] + counts["IfcWallStandardCase"],
     "counts": counts,
-}
+}))
 `,
       });
 
       assert.equal(output.ok, true);
-      assert.equal(output.result.schema, "IFC2X3");
-      assert.equal(output.result.counts.IfcWall, 1078);
-      assert.equal(output.result.counts.IfcWallStandardCase, 904);
-      assert.equal(output.result.wall_count, 1982);
+      const parsed = JSON.parse(output.stdout);
+      assert.equal(parsed.schema, "IFC2X3");
+      assert.equal(parsed.counts.IfcWall, 1078);
+      assert.equal(parsed.counts.IfcWallStandardCase, 904);
+      assert.equal(parsed.wall_count, 1982);
       assert.equal(output.stderr, "");
     });
   },

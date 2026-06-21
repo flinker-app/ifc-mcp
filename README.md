@@ -10,7 +10,7 @@ IFC MCP when it needs the IFC tools and sends your request to the local server.
 IFC MCP reads IFC files locally, runs the needed IFC logic in a local Pyodide
 runtime with IfcOpenShell, and returns the answer to the chat.
 
-[![Watch IFC MCP with Claude demo on YouTube](https://cdn.jsdelivr.net/npm/ifc-mcp@0.1.14/docs/ifc-mcp-demo-thumbnail.jpg)](https://youtu.be/Y4IgtZVmUeE)
+[![Watch IFC MCP with Claude demo on YouTube](https://cdn.jsdelivr.net/npm/ifc-mcp@0.1.15/docs/ifc-mcp-demo-thumbnail.jpg)](https://youtu.be/Y4IgtZVmUeE)
 
 Good example prompts:
 
