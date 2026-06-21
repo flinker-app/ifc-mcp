@@ -28,7 +28,7 @@ export function createServer({
 
   const server = new McpServer({
     name: "IFC MCP",
-    version: "0.1.14",
+    version: "0.1.15",
   });
 
   for (const tool of toolHost.tools) {
