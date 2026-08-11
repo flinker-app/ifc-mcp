@@ -7,12 +7,12 @@
     "url": "https://github.com/flinker-app/ifc-mcp",
     "source": "github"
   },
-  "version": "0.1.16",
+  "version": "0.1.17",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "ifc-mcp",
-      "version": "0.1.16",
+      "version": "0.1.17",
       "transport": {
         "type": "stdio"
       }
