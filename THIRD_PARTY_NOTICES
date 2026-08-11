@@ -7,7 +7,7 @@ The following Flinker CDN artifacts are loaded at runtime and are separately
 licensed unless their served files or accompanying documentation state otherwise:
 
 - https://cdn.flinker.app/ifc-copilot/v1.0.1/ifc-copilot.es.js
-- https://cdn.flinker.app/ifc-viewer/v3.3.2/ifc-viewer.es.js
+- https://cdn.flinker.app/ifc-viewer/v3.4.6/ifc-viewer.es.js
 
 npm dependencies keep their own upstream licenses. See package-lock.json for
 the dependency tree and resolved package versions.
