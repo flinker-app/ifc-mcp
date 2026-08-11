@@ -41,6 +41,29 @@ IFC MCP uses `npx`, which is included with Node.js. If your app later says
 
 ### 2. Choose your client
 
+<a id="chatgpt-desktop"></a>
+<details>
+<summary><strong>ChatGPT desktop app</strong></summary>
+
+ChatGPT desktop supports local MCP servers over STDIO.
+
+1. Open the ChatGPT desktop app.
+2. Open `Settings`.
+3. Select `Plugins`, then `MCPs`.
+4. Click `Add`. If prompted for a server type, choose `STDIO`.
+5. Enter:
+   - Name: `ifc-mcp`
+   - Command to launch: `npx`
+   - First argument: `-y`
+   - Second argument: `ifc-mcp`
+6. Leave the environment variable fields empty and save the server.
+7. Restart the ChatGPT desktop app.
+8. Start a new chat, type `/mcp`, and confirm that `ifc-mcp` is connected.
+
+For more detail, see OpenAI's [MCP documentation](https://learn.chatgpt.com/docs/extend/mcp).
+
+</details>
+
 <a id="claude-desktop"></a>
 <details>
 <summary><strong>Claude Desktop</strong></summary>
