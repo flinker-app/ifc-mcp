@@ -4,9 +4,12 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
+import vm from "node:vm";
+import { createServer } from "node:http";
 
 import { createBcfBytes, createBcfFile, readBcfTopics } from "../src-node/bcf.js";
 import { configureDesktopViewer } from "../src-node/desktop-viewer.js";
+import { toolResult, toolError, toolResultText, bcfToolResult } from "../src-node/tool-results.js";
 import { executeIfcPython } from "../src-node/python-runner.js";
 import {
   clearViewer,
@@ -18,6 +21,26 @@ import {
 } from "../src-node/viewer.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+test("a failed SDK download does not poison later Python calls", async t => {
+  let downloads = 0;
+  const server = createServer((_request, response) => {
+    response.writeHead(++downloads === 1 ? 503 : 200);
+    response.end('let calls = 0; export async function runPythonInWorker() { return { stdout: String(++calls), files: [] }; }');
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const args = { code: "print(1)", files: [], sdkUrl: `http://127.0.0.1:${server.address().port}/sdk.js` };
+  const failed = await executeIfcPython(args);
+  assert.equal(failed.ok, false);
+  assert.match(failed.stderr, /503/);
+  assert.equal(downloads, 1, "The failed call must not be silently retried");
+  const recovered = await executeIfcPython(args);
+  assert.equal(recovered.ok, true, recovered.stderr);
+  assert.equal(recovered.stdout, "1");
+  assert.equal((await executeIfcPython(args)).stdout, "2");
+  assert.equal(downloads, 2, "Successful SDK initialization should stay cached");
+});
 
 test("run Python executes generated code once", async () => {
   const fixture = await sampleIfcFixture();
@@ -38,7 +61,6 @@ result = {
 `,
     files: [fixture.path],
     workingDirectory: fixture.root,
-    timeoutSeconds: 60,
     sdkUrl: await fakeCopilotSdkUrl(fixture.root),
   });
 
@@ -58,7 +80,6 @@ test("run Python reports errors", async () => {
     code: 'raise RuntimeError("boom")',
     files: [fixture.path],
     workingDirectory: fixture.root,
-    timeoutSeconds: 60,
     sdkUrl: await fakeCopilotSdkUrl(fixture.root),
   });
 
@@ -73,7 +94,6 @@ test("run Python saves SDK output files", async () => {
     code: 'result = {"make_saved_file": True}  # make_saved_file',
     files: [fixture.path],
     workingDirectory: fixture.root,
-    timeoutSeconds: 60,
     sdkUrl: await fakeCopilotSdkUrl(fixture.root),
   });
 
@@ -94,7 +114,6 @@ test("run Python works without an IFC file", async () => {
   const executed = await executeIfcPython({
     code: 'print("ok")',
     workingDirectory: root,
-    timeoutSeconds: 60,
     sdkUrl: await fakeCopilotSdkUrl(root),
   });
 
@@ -129,11 +148,11 @@ test("viewer uses one stable URL and serves multiple IFC models", async () => {
   const secondModel = path.join(fixture.root, "second sample.ifc");
   await fs.copyFile(fixture.path, secondModel);
 
-  const openedEmpty = await openViewer();
+  const openedEmpty = (await openViewer()).structuredContent;
   assert.equal(openedEmpty.opened_viewer, true);
   assert.equal(openedEmpty.model_count, 0);
 
-  const opened = await loadIfcFile({ filePath: fixture.path });
+  const opened = (await loadIfcFile({ filePath: fixture.path })).structuredContent;
   const url = new URL(opened.url);
   const base = `${url.protocol}//${url.host}`;
 
@@ -146,7 +165,7 @@ test("viewer uses one stable URL and serves multiple IFC models", async () => {
   assert.equal("vscode_simple_browser_command_uri" in opened, false);
   assert.equal("vscode_simple_browser_instruction" in opened, false);
   assert.match(opened.viewer_instruction, /browser or webview/);
-  assert.equal(opened.loaded_ifc_file, true);
+  assert.equal(opened.loaded_ifc_file, false, "No connected viewer confirmed loading");
   assert.equal(opened.model_count, 1);
 
   const metadata = await jsonFrom(`${base}/metadata`);
@@ -157,7 +176,7 @@ test("viewer uses one stable URL and serves multiple IFC models", async () => {
   const modelBytes = Buffer.from(await (await fetch(`${base}/models/${metadata.models[0].id}`)).arrayBuffer());
   assert.equal(modelBytes.subarray(0, 10).toString("utf8"), "ISO-10303-");
 
-  const openedSecond = await loadIfcFile({ filePath: secondModel });
+  const openedSecond = (await loadIfcFile({ filePath: secondModel })).structuredContent;
   assert.equal(openedSecond.url, opened.url);
   assert.equal(openedSecond.model_count, 2);
   assert.deepEqual(
@@ -170,14 +189,10 @@ test("viewer uses one stable URL and serves multiple IFC models", async () => {
     isolatedGlobalIds: [fixture.wallGuid],
     coloredComponents: [{ color: "#FF0000", global_ids: [fixture.wallGuid] }],
   });
-  assert.equal("session" in updated, false);
-  assert.equal(updated.url, opened.url);
-  assert.equal(updated.applied_to_open_viewer, true);
-  assert.equal(updated.bcf_version, 1);
-  assert.ok(updated.bcf_topic_guid);
-  assert.equal(updated.applied_bcf_path, null);
+  assert.equal(updated.isError, true);
+  assert.match(toolResultText(updated), /No browser viewer is connected/);
 
-  const reopened = await loadIfcFile({ filePath: fixture.path });
+  const reopened = (await loadIfcFile({ filePath: fixture.path })).structuredContent;
   assert.equal(reopened.url, opened.url);
   assert.equal(reopened.model_count, 2);
   assert.equal(reopened.added_model, false);
@@ -185,14 +200,14 @@ test("viewer uses one stable URL and serves multiple IFC models", async () => {
   const state = await jsonFrom(`${base}/state`);
   assert.equal(state.has_bcf, true);
   assert.equal(state.bcf_version, 1);
-  assert.equal(state.bcf_topic_guid, updated.bcf_topic_guid);
+  assert.ok(state.bcf_topic_guid);
 
   const bcfBytes = Buffer.from(await (await fetch(`${base}/bcf`)).arrayBuffer());
   assert.equal(bcfBytes.subarray(0, 2).toString("utf8"), "PK");
 
-  const cleared = await clearViewer();
+  const cleared = (await clearViewer()).structuredContent;
   assert.equal(cleared.url, opened.url);
-  assert.equal(cleared.cleared_viewer, true);
+  assert.equal(cleared.cleared_viewer, Boolean(cleared.desktop_viewer));
   assert.equal(cleared.model_count, 0);
   assert.deepEqual(cleared.models, []);
   assert.equal(cleared.has_bcf, false);
@@ -202,6 +217,151 @@ test("viewer uses one stable URL and serves multiple IFC models", async () => {
   assert.equal(clearedState.model_count, 0);
   assert.deepEqual(clearedState.models, []);
   assert.equal(clearedState.has_bcf, false);
+});
+
+test("browser viewer waits for long loads and returns load, BCF and clear results", async t => {
+  resetViewerForTests();
+  const realSetTimeout = setTimeout;
+  const fixture = await sampleIfcFixture();
+  const opened = (await loadIfcFile({ filePath: fixture.path })).structuredContent;
+  let poll;
+  let report = bcfToolResult({ application: "applied", issues: [{ severity: "warning", message: "Removed #." }] });
+  let failure = false;
+  let selection;
+  let loseReply = false;
+  let bcfAdds = 0;
+  let clears = 0;
+  const script = (await fs.readFile(path.join(repoRoot, "src-node/static/viewer.html"), "utf8"))
+    .match(/<script type="module">([\s\S]*?)<\/script>/)[1].replace(/^\s*import .*;$/gm, "");
+  try {
+    await vm.runInNewContext(`(async () => { ${script} })()`, {
+      toolResult, toolError, bcfToolResult,
+      IfcViewer: class {
+        ready = Promise.resolve();
+        async add(name) {
+          if (!name.endsWith(".bcfzip")) return;
+          bcfAdds++;
+          if (failure) throw new Error("BCF failed");
+          return report;
+        }
+        async clear() { clears++; }
+        async select() { return selection; }
+      },
+      fetch: (url, options = {}) => {
+        if (loseReply && options.body && JSON.parse(options.body).id) {
+          loseReply = false;
+          throw new Error("Temporary connection loss");
+        }
+        return fetch(new URL(url, opened.url), {
+          ...options, headers: { ...options.headers, Origin: opened.url },
+        });
+      },
+      window: { setInterval(callback) { poll = callback; } },
+      document: {}, console: { warn() {}, error(error) { throw error; } }, Uint8Array,
+    });
+    assert.equal(typeof poll, "function");
+    async function requestState() {
+      for (let attempt = 0; attempt < 100; attempt++) {
+        const state = await (await fetch(`${opened.url}/state`)).json();
+        if (state.request_id) return state;
+        await new Promise((resolve) => realSetTimeout(resolve, 10));
+      }
+      throw new Error("No pending viewer request.");
+    }
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const loading = loadIfcFile({ filePath: fixture.path });
+    await requestState();
+    let settled = false;
+    void loading.then(() => { settled = true; });
+    t.mock.timers.tick(120_000);
+    await new Promise(resolve => realSetTimeout(resolve, 0));
+    assert.equal(settled, false, "A large IFC must keep loading beyond one minute");
+    t.mock.timers.reset();
+    await poll();
+    assert.equal((await loading).isError, false);
+
+    const applying = setViewerBcfState({ selectedGlobalIds: [fixture.wallGuid] });
+    await requestState();
+    loseReply = true;
+    await poll();
+    await poll();
+    assert.deepEqual((await applying), report);
+    assert.equal(bcfAdds, 1, "A lost reply must not apply the BCF twice.");
+
+    report = { loaded: true, application: "not-applied", issues: [{ severity: "warning", message: "Import warning." }] };
+    selection = { application: "applied", issues: [] };
+    const selecting = setViewerBcfState({ selectedGlobalIds: [fixture.wallGuid] });
+    await requestState();
+    await poll();
+    const selected = await selecting;
+    assert.equal(selected.isError, false);
+    assert.match(toolResultText(selected), /BCF applied\.\nWarning: Import warning\./);
+    selection = undefined;
+
+    failure = true;
+    report = toolError("BCF failed");
+    const failing = setViewerBcfState({ selectedGlobalIds: [fixture.wallGuid] });
+    await requestState();
+    await poll();
+    const failed = await failing;
+    assert.equal(failed.isError, true);
+    assert.deepEqual(failed, report);
+
+    report = undefined;
+    const failingWithoutReport = setViewerBcfState({ selectedGlobalIds: [fixture.wallGuid] });
+    await requestState();
+    await poll();
+    assert.deepEqual(await failingWithoutReport, toolError("BCF failed"));
+
+    failure = false;
+    const legacy = setViewerBcfState({ selectedGlobalIds: [fixture.wallGuid] });
+    await requestState();
+    await poll();
+    const unconfirmed = await legacy;
+    assert.equal(unconfirmed.isError, true);
+    assert.match(toolResultText(unconfirmed), /could not be confirmed/);
+
+    const superseded = loadIfcFile({ filePath: fixture.path });
+    await requestState();
+    const clearing = clearViewer();
+    assert.match(toolResultText(await superseded), /superseded/);
+    await poll();
+    assert.equal((await clearing).isError, false);
+    assert.equal(clears, 1);
+  } finally {
+    resetViewerForTests();
+  }
+});
+
+test("viewer validates acknowledgements and releases cancelled requests", async () => {
+  resetViewerForTests();
+  const opened = (await openViewer()).structuredContent;
+  const exchange = message => fetch(`${opened.url}/state`, {
+    method: "POST", headers: { Origin: opened.url, "Content-Type": "application/json" },
+    body: JSON.stringify(message),
+  });
+  await exchange({});
+  const controller = new AbortController();
+  const pending = clearViewer({ signal: controller.signal });
+  let state;
+  for (let i = 0; i < 100; i++) {
+    state = await jsonFrom(`${opened.url}/state`);
+    if (state.request_id) break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.ok(state.request_id);
+  for (const result of [{ content: "invalid" }, { content: [{ type: "image" }] }, { success: true }]) {
+    assert.equal((await exchange({ id: state.request_id, result })).status, 400);
+    assert.equal((await jsonFrom(`${opened.url}/state`)).request_id, state.request_id);
+  }
+  controller.abort(new Error("Stop viewer wait"));
+  assert.match(toolResultText(await pending), /Stop viewer wait/);
+  assert.equal((await jsonFrom(`${opened.url}/state`)).request_id, null);
+  assert.equal((await exchange({ id: state.request_id, result: toolResult("late") })).status, 409);
+  // The development viewer must serve helpers that can load without a bundler.
+  const source = await (await fetch(`${opened.url}/tool-results.js`)).text();
+  const helper = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
+  assert.deepEqual(helper.toolResult("ready"), toolResult("ready"));
 });
 
 test("viewer can load a generated IFC download URL", async () => {
@@ -214,10 +374,10 @@ test("viewer can load a generated IFC download URL", async () => {
     type: "application/octet-stream",
   });
 
-  const opened = await loadIfcFile({ filePath: download.url });
+  const opened = (await loadIfcFile({ filePath: download.url })).structuredContent;
   const base = opened.url;
 
-  assert.equal(opened.loaded_ifc_file, true);
+  assert.equal(opened.loaded_ifc_file, false, "No connected viewer confirmed loading");
   assert.equal(opened.active_model_path, download.url);
   assert.equal(opened.active_model_filename, "generated-model.ifc");
   assert.equal(opened.model_count, 1);
@@ -226,7 +386,7 @@ test("viewer can load a generated IFC download URL", async () => {
   const servedBytes = Buffer.from(await (await fetch(`${base}/models/${opened.models[0].id}`)).arrayBuffer());
   assert.equal(servedBytes.subarray(0, 10).toString("utf8"), "ISO-10303-");
 
-  const openedAgain = await loadIfcFile({ filePath: `${download.url}?ignored=true` });
+  const openedAgain = (await loadIfcFile({ filePath: `${download.url}?ignored=true` })).structuredContent;
   assert.equal(openedAgain.model_count, 1);
   assert.equal(openedAgain.added_model, false);
 });
@@ -234,7 +394,7 @@ test("viewer can load a generated IFC download URL", async () => {
 test("viewer can apply a generated BCF download URL", async () => {
   resetViewerForTests();
   const fixture = await sampleIfcFixture();
-  const opened = await loadIfcFile({ filePath: fixture.path });
+  const opened = (await loadIfcFile({ filePath: fixture.path })).structuredContent;
   const created = await createBcfBytes({
     title: "Generated BCF",
     selectedGlobalIds: [fixture.wallGuid],
@@ -249,16 +409,13 @@ test("viewer can apply a generated BCF download URL", async () => {
 
   const updated = await setViewerBcfState({ bcfPath: download.url });
 
-  assert.equal(updated.url, opened.url);
-  assert.equal(updated.applied_to_open_viewer, true);
-  assert.equal(updated.has_bcf, true);
-  assert.equal(updated.bcf_version, 1);
-  assert.equal(updated.bcf_topic_guid, created.metadata.topic_guid);
-  assert.equal(updated.applied_bcf_path, new URL(download.url).origin + new URL(download.url).pathname);
+  assert.equal(updated.isError, true);
+  assert.match(toolResultText(updated), /No browser viewer is connected/);
 
   const state = await jsonFrom(`${opened.url}/state`);
   assert.equal(state.bcf_filename, "generated-view.bcfzip");
-  assert.equal(state.bcf_metadata.source_path, updated.applied_bcf_path);
+  assert.equal(state.bcf_metadata.source_path, new URL(download.url).origin + new URL(download.url).pathname);
+  assert.equal(state.bcf_topic_guid, created.metadata.topic_guid);
 
   const bcfBytes = Buffer.from(await (await fetch(`${opened.url}/bcf`)).arrayBuffer());
   assert.equal(bcfBytes.subarray(0, 2).toString("utf8"), "PK");
@@ -295,25 +452,23 @@ fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({ args }) + "\\n");
   });
 
   try {
-    const opened = await openViewer();
+    const opened = (await openViewer()).structuredContent;
     assert.equal(opened.desktop_viewer, true);
     assert.equal(opened.opened_viewer, true);
     assert.equal(opened.url, null);
 
-    const loaded = await loadIfcFile({ filePath: fixture.path });
+    const loaded = (await loadIfcFile({ filePath: fixture.path })).structuredContent;
     assert.equal(loaded.desktop_viewer, true);
     assert.equal(loaded.loaded_ifc_file, true);
     assert.deepEqual(loaded.desktop_file_paths, [fixture.path]);
 
     const updated = await setViewerBcfState({ bcfPath });
-    assert.equal(updated.desktop_viewer, true);
-    assert.equal(updated.applied_to_open_viewer, true);
-    assert.deepEqual(updated.desktop_file_paths, [fixture.path, bcfPath]);
-    assert.equal(updated.bcf_topic_guid, created.metadata.topic_guid);
+    assert.equal(updated.isError, true);
+    assert.match(toolResultText(updated), /could not be confirmed/);
 
-    const cleared = await clearViewer();
+    const cleared = (await clearViewer()).structuredContent;
     assert.equal(cleared.desktop_viewer, true);
-    assert.equal(cleared.cleared_viewer, true);
+    assert.equal(cleared.cleared_viewer, Boolean(cleared.desktop_viewer));
 
     const launches = await waitForLaunches(logPath, 4);
     assertLaunchesInclude(launches, [

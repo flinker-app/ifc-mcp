@@ -1,28 +1,36 @@
+import { IFC_MCP_TOOL_NAMES } from "./tool-definitions.js";
+import { pythonToolResult } from "./tool-results.js";
+
 export function createIfcMcpHostHandlers({
   viewer = null,
   python = null,
 } = {}) {
-  const handlers = {};
+  const supplied = { ...python, ...viewer };
+  return Object.fromEntries(IFC_MCP_TOOL_NAMES
+    .filter(name => typeof supplied[name] === "function")
+    .map(name => [name, supplied[name]]));
+}
 
-  if (typeof python?.["run-python"] === "function") {
-    handlers["run-python"] = python["run-python"];
-  }
+// Tool parameter mapping is shared by the Node and browser runtimes.
+export function createIfcMcpToolHandlers(operations) {
+  const handlers = {
+    "run-python": operations["run-python"] && (async ({ code, files }, request) => publicPythonResult(await operations["run-python"]({ code, files, signal: request.signal }))),
+    "open-ifc-viewer": operations["open-ifc-viewer"] && ((_args, request) => operations["open-ifc-viewer"](request)),
+    "show-ifc-file": operations["show-ifc-file"] && (({ file_path }, request) => operations["show-ifc-file"](file_path, request)),
+    "clear-ifc-viewer": operations["clear-ifc-viewer"] && ((_args, request) => operations["clear-ifc-viewer"](request)),
+    "set-bcf-view": operations["set-bcf-view"] && (({ bcf_path }, request) => operations["set-bcf-view"](bcf_path, request)),
+  };
+  return createIfcMcpHostHandlers({ viewer: handlers });
+}
 
-  if (typeof viewer?.["open-ifc-viewer"] === "function") {
-    handlers["open-ifc-viewer"] = viewer["open-ifc-viewer"];
-  }
-
-  if (typeof viewer?.["show-ifc-file"] === "function") {
-    handlers["show-ifc-file"] = viewer["show-ifc-file"];
-  }
-
-  if (typeof viewer?.["clear-ifc-viewer"] === "function") {
-    handlers["clear-ifc-viewer"] = viewer["clear-ifc-viewer"];
-  }
-
-  if (typeof viewer?.["set-bcf-view"] === "function") {
-    handlers["set-bcf-view"] = viewer["set-bcf-view"];
-  }
-
-  return handlers;
+export function publicPythonResult(value) {
+  if (value && typeof value === "object" && "content" in value) return pythonToolResult(value);
+  return pythonToolResult({
+    ok: Boolean(value?.ok),
+    result: value?.result ?? null,
+    stdout: value?.stdout || "",
+    stderr: value?.stderr || "",
+    saved_files: Array.isArray(value?.saved_files) ? value.saved_files : [],
+    uploaded_files: Array.isArray(value?.uploaded_files) ? value.uploaded_files : [],
+  });
 }

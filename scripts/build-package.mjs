@@ -1,31 +1,42 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { build, transform } from "esbuild";
+import { syncServerMetadata } from "./sync-server-metadata.mjs";
 
-const root = process.cwd();
+const root = fileURLToPath(new URL("../", import.meta.url));
 const dist = path.join(root, "dist");
 const viewerSource = path.join(root, "src-node", "static", "viewer.html");
 const viewerTarget = path.join(dist, "static", "viewer.html");
 const external = [
-  "@modelcontextprotocol/sdk",
-  "@modelcontextprotocol/sdk/*",
+  "@modelcontextprotocol/server",
+  "@modelcontextprotocol/server/*",
+  "@modelcontextprotocol/core",
   "fast-xml-parser",
   "jszip",
   "zod",
   "zod/*",
 ];
 
+await syncServerMetadata();
+if ((await fs.lstat(dist).catch(error => { if (error.code !== "ENOENT") throw error; }))?.isSymbolicLink()) {
+  throw new Error(`Refusing to replace a linked build directory: ${dist}`);
+}
 await fs.rm(dist, { recursive: true, force: true });
 await fs.mkdir(path.dirname(viewerTarget), { recursive: true });
+await fs.copyFile(path.join(root, "src-node", "tool-results.d.ts"), path.join(dist, "tool-results.d.ts"));
 
 await build({
-  entryPoints: [path.join(root, "bin", "ifc-mcp.js")],
-  outfile: path.join(dist, "ifc-mcp.js"),
+  entryPoints: {
+    "ifc-mcp": path.join(root, "bin", "ifc-mcp.js"),
+    server: path.join(root, "src-node", "server.js"),
+  },
+  outdir: dist,
   bundle: true,
   platform: "node",
   format: "esm",
-  target: "node18.20",
+  target: "node20",
   minify: true,
   sourcemap: false,
   legalComments: "none",
@@ -33,21 +44,11 @@ await build({
 });
 
 await build({
-  entryPoints: [path.join(root, "src-node", "server.js")],
-  outfile: path.join(dist, "server.js"),
-  bundle: true,
-  platform: "node",
-  format: "esm",
-  target: "node18.20",
-  minify: true,
-  sourcemap: false,
-  legalComments: "none",
-  external,
-});
-
-await build({
-  entryPoints: [path.join(root, "src-node", "browser.js")],
-  outfile: path.join(dist, "browser.js"),
+  entryPoints: {
+    browser: path.join(root, "src-node", "browser.js"),
+    "tool-results": path.join(root, "src-node", "tool-results.js"),
+  },
+  outdir: dist,
   bundle: true,
   platform: "browser",
   format: "esm",
@@ -55,7 +56,6 @@ await build({
   minify: true,
   sourcemap: false,
   legalComments: "none",
-  external: ["zod", "zod/*"],
 });
 
 await fs.writeFile(viewerTarget, await minifyViewerHtml(await fs.readFile(viewerSource, "utf8")));

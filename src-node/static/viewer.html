@@ -23,6 +23,7 @@
 
   <script type="module">
     import { IfcViewer } from "https://cdn.flinker.app/ifc-viewer/v3.4.6/ifc-viewer.es.js";
+    import { toolResult, toolError, bcfToolResult } from "/tool-results.js";
 
     async function bytesFrom(url) {
       const response = await fetch(url);
@@ -32,8 +33,9 @@
       return new Uint8Array(await response.arrayBuffer());
     }
 
-    async function jsonFrom(url) {
-      const response = await fetch(url);
+    async function syncState(result = {}) {
+      const response = await fetch("/state", { method: "POST",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify(result) });
       if (!response.ok) {
         throw new Error(`${response.status} ${response.statusText}`);
       }
@@ -46,74 +48,85 @@
       await viewer.ready;
 
       const loadedModels = new Set();
-      const loadingModels = new Set();
       let loadedBcfVersion = 0;
-      let applyingBcf = false;
 
-      async function loadModels(state, quiet = false) {
+      async function loadModels(state) {
         const models = Array.isArray(state.models) ? state.models : [];
         const stateModelIds = new Set(models.map((model) => model.id).filter(Boolean));
         const hasStaleModels = [...loadedModels].some((id) => !stateModelIds.has(id));
         if (hasStaleModels || (!models.length && loadedModels.size)) {
-          window.location.reload();
-          return;
+          await viewer.clear();
+          loadedModels.clear();
+          loadedBcfVersion = 0;
         }
 
         for (const model of models) {
-          if (!model.id || loadedModels.has(model.id) || loadingModels.has(model.id)) {
+          if (!model.id || loadedModels.has(model.id)) {
             continue;
           }
-          loadingModels.add(model.id);
-          try {
-            await viewer.add(
-              model.filename || "model.ifc",
-              await bytesFrom(`/models/${encodeURIComponent(model.id)}`)
-            );
-            loadedModels.add(model.id);
-          } catch (error) {
-            loadedModels.delete(model.id);
-            throw error;
-          } finally {
-            loadingModels.delete(model.id);
-          }
+          await viewer.add(
+            model.filename || "model.ifc",
+            await bytesFrom(`/models/${encodeURIComponent(model.id)}`)
+          );
+          loadedModels.add(model.id);
         }
       }
 
-      async function applyBcfState(state, quiet = false) {
-        if (!state.has_bcf || state.bcf_version <= loadedBcfVersion || applyingBcf) {
+      async function applyBcfState(state) {
+        if (!state.has_bcf || state.bcf_version <= loadedBcfVersion) {
           return;
         }
 
-        applyingBcf = true;
         try {
           const safeName = state.bcf_filename || "viewpoint.bcfzip";
           const versionedName = `${state.bcf_version}-${safeName}`;
-          await viewer.add(
+          let result = await viewer.add(
             versionedName,
             await bytesFrom(`/bcf?version=${state.bcf_version}`)
           );
 
-          if (state.bcf_topic_guid && typeof viewer.select === "function") {
-            await viewer.select(state.bcf_topic_guid);
+          // Released viewer builds return import diagnostics before topic selection.
+          if (!Array.isArray(result?.content) && state.bcf_topic_guid && typeof viewer.select === "function"
+            && !["applied", "partial"].includes(result?.application)) {
+            const selected = await viewer.select(state.bcf_topic_guid);
+            if (selected) result = { ...result, ...selected, issues: [...(result?.issues || []), ...(selected.issues || [])] };
           }
-          loadedBcfVersion = state.bcf_version;
+          return bcfToolResult(result);
         } finally {
-          applyingBcf = false;
+          loadedBcfVersion = state.bcf_version;
         }
       }
 
-      async function syncViewer(quiet = false) {
-        const state = await jsonFrom("/state");
-        document.title = state.title || "IFC MCP Viewer";
-        await loadModels(state, quiet);
-        await applyBcfState(state, quiet);
+      let syncing = false;
+      let reply = null;
+      async function syncViewer() {
+        if (syncing) return;
+        syncing = true;
+        try {
+          const state = await syncState();
+          document.title = state.title || "IFC MCP Viewer";
+          if (!reply || reply.id !== state.request_id) {
+            let result;
+            try {
+              await loadModels(state);
+              result = await applyBcfState(state) || toolResult("Viewer updated.");
+            } catch (error) {
+              result = toolError(error);
+              console.warn("Viewer request failed", error);
+            }
+            reply = state.request_id ? { id: state.request_id, result } : null;
+          }
+          if (reply) { await syncState(reply); reply = null; }
+        } finally {
+          syncing = false;
+        }
       }
 
-      await syncViewer(false);
+      await syncViewer();
 
       window.setInterval(async () => {
         try {
-          await syncViewer(true);
+          await syncViewer();
         } catch (error) {
           console.warn("IFC MCP state poll failed", error);
         }

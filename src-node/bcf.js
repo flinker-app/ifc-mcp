@@ -270,7 +270,7 @@ function parseViewpoint(viewpoint, filename) {
     colored_components: asArray(components.Coloring?.Color)
       .map((item) => ({
         color: normalizeColor(item?.["@_Color"]),
-        global_ids: asArray(item?.Component)
+        global_ids: asArray(item?.Components?.Component ?? item?.Component)
           .map((component) => component?.["@_IfcGuid"])
           .filter(Boolean),
       }))
@@ -303,7 +303,7 @@ function cleanColoredComponents(coloredComponents) {
 
 function normalizeColor(value) {
   const color = String(value || "").trim().replace(/^#/, "").toUpperCase();
-  return /^[0-9A-F]{6}$/.test(color) ? color : null;
+  return /^[0-9A-F]{6}([0-9A-F]{2})?$/.test(color) ? color : null;
 }
 
 function randomGuid() {

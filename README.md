@@ -28,11 +28,14 @@ download link. If you ask to view a model, IFC MCP opens a local viewer link.
 If your AI client does not open that link automatically, open it in your
 browser.
 
+Large IFC files can take more than a minute to process. Cancelling a request
+does not stop Python already running; wait for it to finish before trying again.
+
 ## Installation
 
 ### 1. Prerequisites
 
-Install Node.js 18.20 or newer from the [official Node.js download page](https://nodejs.org/en/download).
+Install Node.js 20 or newer from the [official Node.js download page](https://nodejs.org/en/download).
 Choose the LTS version for your operating system, run the installer, then
 reopen the app where you want to use IFC MCP.
 
@@ -276,6 +279,9 @@ const server = createServer({
 
 The callback names and argument names match the MCP tool names and schemas, so
 there is no second naming system to learn.
+
+Browser apps can use `createIfcMcpHost` from `ifc-mcp/browser` to run the tools
+locally with their own viewer.
 
 ## Local Development
 

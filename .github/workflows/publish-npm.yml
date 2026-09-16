@@ -31,20 +31,13 @@ jobs:
         run: |
           set -euo pipefail
 
+          node scripts/sync-server-metadata.mjs --check
+
           package_name="$(node -p "require('./package.json').name")"
           package_version="$(node -p "require('./package.json').version")"
           server_name="$(node -p "require('./server.json').name")"
           server_version="$(node -p "require('./server.json').version")"
-          server_package_version="$(node -p "require('./server.json').packages[0].version")"
           encoded_server_name="$(node -p "encodeURIComponent(require('./server.json').name)")"
-
-          if [ "$package_version" != "$server_version" ] || [ "$package_version" != "$server_package_version" ]; then
-            echo "Version mismatch:"
-            echo "package.json version: ${package_version}"
-            echo "server.json version: ${server_version}"
-            echo "server.json package version: ${server_package_version}"
-            exit 1
-          fi
 
           npm_already_published=false
           if npm view "${package_name}@${package_version}" version >/dev/null 2>&1; then
