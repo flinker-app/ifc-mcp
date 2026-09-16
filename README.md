@@ -257,31 +257,65 @@ interface and apply viewer actions in your app instead of opening the default
 local viewer. The MCP client still calls tools like `show-ifc-file` and
 `set-bcf-view`; your app only defines what those viewer tools do.
 
+<details>
+<summary><strong>Node MCP server</strong></summary>
+
+Provide handlers that receive local file paths. Replace the functions below
+with your app's viewer actions:
+
 ```js
 import { createServer } from "ifc-mcp";
+import { serveStdio } from "@modelcontextprotocol/server/stdio";
 
-const server = createServer({
+serveStdio(() => createServer({
   viewer: {
-    "show-ifc-file": async ({ file_path }) => {
-      return loadIfcIntoThisViewer(file_path);
-    },
-
-    "set-bcf-view": async ({ bcf_path }) => {
-      return applyBcfToThisViewer(bcf_path);
-    },
-
-    "clear-ifc-viewer": async () => {
-      return clearThisViewer();
-    },
+    "open-ifc-viewer": () => openThisViewer(),
+    "show-ifc-file": ({ file_path }) => loadIfcIntoThisViewer(file_path),
+    "set-bcf-view": ({ bcf_path }) => applyBcfToThisViewer(bcf_path),
+    "clear-ifc-viewer": () => clearThisViewer(),
   },
+}));
+```
+
+Return MCP tool results from your handlers: `content` contains feedback, and
+`isError: true` indicates failure.
+
+</details>
+
+<details>
+<summary><strong>Browser app</strong></summary>
+
+Pass files selected in your app and callbacks for your existing viewer.
+Here, `file` is a selected IFC `File`, and `viewer` is your viewer instance:
+
+```js
+import { createIfcMcpHost } from "ifc-mcp/browser";
+
+const files = new Map([
+  [file.name, { name: file.name, source: file }],
+]);
+
+const host = createIfcMcpHost({
+  files,
+  viewer: {
+    "show-ifc-file": (name, bytes) => viewer.add(name, bytes),
+    "set-bcf-view": (name, bytes) => viewer.add(name, bytes),
+    "clear-ifc-viewer": () => viewer.clear(),
+  },
+});
+
+const result = await host.handleToolCall({
+  name: "show-ifc-file",
+  input: { file_path: file.name },
 });
 ```
 
-The callback names and argument names match the MCP tool names and schemas, so
-there is no second naming system to learn.
+File callbacks receive a filename and `Uint8Array` bytes. The BCF callback
+must return an MCP tool result describing whether the viewpoint was applied.
+Use `host.tools` for the tool definitions and `host.getGeneratedFiles()` for
+generated downloads. Call `host.clearFiles()` when those downloads are no longer needed.
 
-Browser apps can use `createIfcMcpHost` from `ifc-mcp/browser` to run the tools
-locally with their own viewer.
+</details>
 
 ## Local Development
 
