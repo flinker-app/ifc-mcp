@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { CallToolResultSchema } from "@modelcontextprotocol/core";
 
 import { BCF_SUFFIXES, DEFAULT_VIEWER_PORT, DEFAULT_VIEWER_URL, IFC_SUFFIXES } from "./constants.js";
 import { createBcfBytes, readBcfTopics, readBcfTopicsFromBytes } from "./bcf.js";
@@ -14,23 +15,27 @@ import {
 import { addDownload, getDownload, resetDownloadsForTests } from "./downloads.js";
 import { resolvePath } from "./paths.js";
 import { nowIso, tokenUrlSafe } from "./utils.js";
+import { toolResult, toolError, toolResultText, bcfToolResult } from "./tool-results.js";
 
 let activeView = null;
 let viewerServer = null;
 let viewerPort = null;
+let viewerLastSeen = 0;
+let pendingViewerResult = null;
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const viewerHtmlPath = path.join(moduleDir, "static", "viewer.html");
 const VIEWER_TITLE = "IFC MCP Viewer";
 const VIEWPOINT_TITLE = "IFC MCP Viewpoint";
 
-export async function openViewer() {
+export async function openViewer({ signal } = {}) {
+  signal?.throwIfAborted();
   const view = ensureActiveView();
   view.title = VIEWER_TITLE;
   view.updatedAt = nowIso();
 
   const desktopResult = await openWithDesktopViewer({ view, activeModel: activeModel(view) });
-  if (desktopResult) return desktopResult;
+  if (desktopResult) return toolResult(desktopResult);
 
   await ensureViewerServer();
 
@@ -38,15 +43,17 @@ export async function openViewer() {
     addedModel: false,
     activeModel: activeModel(view),
   });
-  return {
+  return toolResult({
     ...response,
     opened_viewer: true,
-  };
+  });
 }
 
 export async function loadIfcFile({
   filePath,
+  signal,
 }) {
+  signal?.throwIfAborted();
   const modelSource = resolveIfcModelSource(filePath);
 
   const view = ensureActiveView();
@@ -57,20 +64,23 @@ export async function loadIfcFile({
   view.updatedAt = nowIso();
 
   const desktopResult = await loadFileWithDesktopViewer({ view, model, added });
-  if (desktopResult) return desktopResult;
+  if (desktopResult) return toolResult(desktopResult);
 
   await ensureViewerServer();
   const response = viewerResponse(view, {
     addedModel: added,
     activeModel: model,
   });
-  return {
+  const result = await waitForViewerResult(signal);
+  return toolResult({
     ...response,
-    loaded_ifc_file: true,
-  };
+    ...(result.isError ? { error: toolResultText(result) } : {}),
+    loaded_ifc_file: !result.isError,
+  }, result.isError);
 }
 
-export async function clearViewer() {
+export async function clearViewer({ signal } = {}) {
+  signal?.throwIfAborted();
   const view = ensureActiveView();
   view.title = VIEWER_TITLE;
   view.models = [];
@@ -83,16 +93,18 @@ export async function clearViewer() {
   view.updatedAt = nowIso();
 
   const desktopResult = await clearWithDesktopViewer({ view });
-  if (desktopResult) return desktopResult;
+  if (desktopResult) return toolResult(desktopResult);
 
   await ensureViewerServer();
-  return {
+  const result = await waitForViewerResult(signal);
+  return toolResult({
     ...viewerResponse(view, {
       addedModel: false,
       activeModel: null,
     }),
-    cleared_viewer: true,
-  };
+    ...(result.isError ? { error: toolResultText(result) } : {}),
+    cleared_viewer: !result.isError,
+  }, result.isError);
 }
 
 export async function setViewerBcfState({
@@ -101,7 +113,9 @@ export async function setViewerBcfState({
   isolatedGlobalIds = null,
   hiddenGlobalIds = null,
   coloredComponents = null,
+  signal,
 }) {
+  signal?.throwIfAborted();
   const view = ensureActiveView();
   const targetModel = activeModel(view);
   if (!targetModel) {
@@ -133,6 +147,7 @@ export async function setViewerBcfState({
     bcfFilename = `ifc-mcp-viewpoint-${view.bcfVersion + 1}.bcfzip`;
   }
 
+  signal?.throwIfAborted();
   view.bcfPath = bcfSource?.bytes ? null : bcfSource?.path || null;
   view.bcfBytes = bcfBytes;
   view.bcfFilename = bcfFilename;
@@ -142,26 +157,31 @@ export async function setViewerBcfState({
 
   const desktopResult = await applyBcfStateWithDesktopViewer({
     view,
-    activeModel: targetModel,
     bcfSource,
     bcfBytes,
     bcfFilename: bcfFilename || "viewpoint.bcfzip",
-    bcfTopicGuid: topicGuid(view),
   });
   if (desktopResult) return desktopResult;
 
-  return {
-    ...viewerResponse(view, {
-      addedModel: false,
-      activeModel: targetModel,
-    }),
-    applied_to_open_viewer: true,
-    bcf_version: view.bcfVersion,
-    bcf_topic_guid: topicGuid(view),
-    applied_bcf_path: bcfSource?.path || null,
-    note:
-      "The already-open viewer polls the active view and applies this BCF state. Use show IFC file for model display and set BCF view only for BCF viewpoint files.",
-  };
+  return bcfToolResult(await waitForViewerResult(signal));
+}
+
+function waitForViewerResult(signal) {
+  signal?.throwIfAborted();
+  if (!pendingViewerResult && Date.now() - viewerLastSeen > 5000) {
+    return Promise.resolve(toolError("No browser viewer is connected; application is unconfirmed."));
+  }
+  pendingViewerResult?.finish(toolError("A newer viewer request superseded this one."));
+  return new Promise((resolve) => {
+    const cancel = () => pending.finish(toolError(signal.reason ?? "Viewer request cancelled."));
+    const pending = { id: tokenUrlSafe(12), finish(result) {
+      signal?.removeEventListener("abort", cancel);
+      if (pendingViewerResult === pending) pendingViewerResult = null;
+      resolve(result);
+    } };
+    pendingViewerResult = pending;
+    signal?.addEventListener("abort", cancel, { once: true });
+  });
 }
 
 export async function createDownloadUrl({ name, bytes, type = "application/octet-stream", sdkPath = null }) {
@@ -216,7 +236,7 @@ export async function viewerCli(args) {
     });
   }
   console.log(JSON.stringify(result, null, 2));
-  return 0;
+  return result.isError ? 1 : 0;
 }
 
 async function startHttpServer(port) {
@@ -250,8 +270,45 @@ async function handleViewerRequest(request, response) {
       return;
     }
 
+    if (url.pathname === "/tool-results.js") {
+      sendBytes(response, await fs.readFile(path.join(moduleDir, "tool-results.js")), {
+        contentType: "text/javascript; charset=utf-8",
+      });
+      return;
+    }
+
     if (url.pathname === "/metadata" || url.pathname === "/state") {
-      sendJson(response, viewMetadata(activeView));
+      if (url.pathname === "/state" && request.method === "POST") {
+        if (request.headers.origin !== viewerUrl()) {
+          sendJson(response, { error: "Results must come from this viewer." }, 403);
+          return;
+        }
+        const chunks = [];
+        let size = 0;
+        for await (const chunk of request) {
+          size += chunk.length;
+          if (size > 65536) { sendJson(response, { error: "Result is too large." }, 413); return; }
+          chunks.push(chunk);
+        }
+        let message;
+        try { message = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch {
+          sendJson(response, { error: "Invalid viewer result." }, 400); return;
+        }
+        if (!message || typeof message !== "object" || Array.isArray(message)) {
+          sendJson(response, { error: "Invalid viewer result." }, 400); return;
+        }
+        if (message.id) {
+          if (message.id !== pendingViewerResult?.id || !message.result || typeof message.result !== "object" || Array.isArray(message.result)) {
+            sendJson(response, { error: "Stale or invalid viewer result." }, 409); return;
+          }
+          if (!Array.isArray(message.result.content) || !CallToolResultSchema.safeParse(message.result).success) {
+            sendJson(response, { error: "Invalid MCP viewer result." }, 400); return;
+          }
+          pendingViewerResult.finish(message.result);
+        }
+        viewerLastSeen = Date.now();
+      }
+      sendJson(response, { ...viewMetadata(activeView), request_id: pendingViewerResult?.id || null });
       return;
     }
 
@@ -605,6 +662,8 @@ function parseViewerArgs(args) {
 }
 
 export function resetViewerForTests() {
+  pendingViewerResult?.finish(toolError("Viewer reset."));
+  viewerLastSeen = 0;
   activeView = null;
   resetDownloadsForTests();
 }

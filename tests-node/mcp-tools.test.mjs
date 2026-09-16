@@ -5,10 +5,12 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import JSZip from "jszip";
 
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { Client } from "@modelcontextprotocol/client";
+import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 
+import { toolResult, toolError } from "../src-node/tool-results.js";
 import { createBcfFile, readBcfTopicsFromBytes } from "../src-node/bcf.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -34,8 +36,7 @@ test("MCP run-python schema uses plural files and explains file inputs", async (
     assert.equal(tools.tools.some((tool) => tool.name === "set-ifc-view"), false);
     assert.equal(tools.tools.some((tool) => tool.name === "load-ifc-file"), false);
     assert.equal(tools.tools.some((tool) => tool.name === "update-ifc-viewer"), false);
-    assert.deepEqual(runPython.inputSchema.required, ["code"]);
-    assert.match(runPython.description, /desktop Node server[\s\S]*browser-defined paths/i);
+    assert.deepEqual(runPython.inputSchema.required, ["files", "code"]);
     assert.match(runPython.description, /Pyodide 0\.28\.2/);
     assert.match(runPython.description, /ifcopenshell/);
     assert.equal("file_path" in runPython.inputSchema.properties, false);
@@ -71,13 +72,13 @@ test("MCP run-python schema uses plural files and explains file inputs", async (
   });
 });
 
-test("MCP run-python accepts omitted files for non-file Python jobs", async () => {
+test("MCP run-python accepts empty files for non-file Python jobs", async () => {
   await withMcpClient(async (client) => {
     const output = await callRunPython(client, {
       code: 'print("ok")',
+      files: [],
     });
 
-    assert.equal(output.ok, true);
     assert.equal(output.stdout, "ok\n");
     assert.deepEqual(output.uploaded_files, []);
   });
@@ -93,7 +94,6 @@ test("MCP run-python rejects old file_path argument", async () => {
           code: 'result = {"bad": "old file_path"}',
         },
       },
-      undefined,
       { timeout: 30_000 },
     );
 
@@ -112,7 +112,6 @@ test("MCP run-python mounts IFC paths with spaces for direct Python open", async
   await withMcpClient(async (client) => {
     const output = await callRunPython(client, {
       files: [ifcPath],
-      timeout_seconds: 180,
       code: `
 import ifcopenshell
 import json
@@ -132,7 +131,6 @@ print(json.dumps({
 `,
     });
 
-    assert.equal(output.ok, true);
     const parsed = JSON.parse(output.stdout);
     assert.equal(output.uploaded_files[0].path, ifcPath);
     assert.equal(output.uploaded_files[0].name, "Snowdon Towers Sample Architectural_IFC2x3.ifc");
@@ -155,7 +153,6 @@ test("MCP run-python mounts multiple IFC files", async () => {
   await withMcpClient(async (client) => {
     const output = await callRunPython(client, {
       files: [firstPath, secondPath],
-      timeout_seconds: 180,
       code: `
 import ifcopenshell
 import json
@@ -170,7 +167,6 @@ print(json.dumps({
 `,
     });
 
-    assert.equal(output.ok, true);
     const parsed = JSON.parse(output.stdout);
     assert.deepEqual(output.uploaded_files.map((file) => file.path), [firstPath, secondPath]);
     assert.deepEqual(parsed.mounted_names, ["sample.ifc", "sample copy.ifc"]);
@@ -183,7 +179,6 @@ test("MCP run-python parses sample IFC through the real CDN Pyodide runtime", as
   await withMcpClient(async (client) => {
     const output = await callRunPython(client, {
       files: [sampleIfc],
-      timeout_seconds: 180,
       code: `
 import ifcopenshell
 import json
@@ -198,7 +193,6 @@ print(json.dumps({
 `,
     });
 
-    assert.equal(output.ok, true);
     const parsed = JSON.parse(output.stdout);
     assert.equal(parsed.schema, "IFC4");
     assert.equal(parsed.wall_count, 1);
@@ -211,7 +205,6 @@ test("MCP run-python validates sample IFC through the real CDN Pyodide runtime",
   await withMcpClient(async (client) => {
     const output = await callRunPython(client, {
       files: [sampleIfc],
-      timeout_seconds: 180,
       code: `
 import ifcopenshell
 import ifcopenshell.validate as ifc_validate
@@ -227,7 +220,6 @@ print(json.dumps({
 `,
     });
 
-    assert.equal(output.ok, true);
     const parsed = JSON.parse(output.stdout);
     assert.equal(parsed.schema, "IFC4");
     assert.equal(typeof parsed.issue_count, "number");
@@ -235,19 +227,22 @@ print(json.dumps({
   });
 });
 
-test("set-bcf-view Python example generates and applies a valid BCFZIP", async () => {
+test("set-bcf-view Python examples generate and apply valid BCFZIPs", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "ifc-mcp-bcf-examples-"));
+  const exampleIfc = path.join(root, "sample.ifc");
+  const fixture = await fs.readFile(path.join(repoRoot, "tests-node/fixtures/prompt-model.ifc"), "utf8");
+  await fs.writeFile(exampleIfc, fixture);
+  const wallGuid = fixture.match(/=IFCWALL\('([^']+)'/)[1];
   await withMcpClient(async (client) => {
     const tools = await client.listTools();
     const setView = tools.tools.find((tool) => tool.name === "set-bcf-view");
     assert.ok(setView, "set-bcf-view tool should be registered");
 
     const output = await callRunPython(client, {
-      files: [sampleIfc],
-      timeout_seconds: 180,
+      files: [exampleIfc],
       code: extractPythonExample(setView.description),
     });
 
-    assert.equal(output.ok, true);
     assert.match(output.stdout, /view\.bcfzip/);
     const bcfFile = output.saved_files.find((file) => file.name === "view.bcfzip");
     assert.ok(bcfFile?.url, "Python example should return view.bcfzip in saved_files");
@@ -261,23 +256,46 @@ test("set-bcf-view Python example generates and applies a valid BCFZIP", async (
     assert.equal(parsed.topic_count, 1);
     assert.equal(parsed.topics[0].title, "Review wall");
     assert.deepEqual(parsed.topics[0].viewpoints[0].selected_global_ids, [
-      "0000000000000000000005",
+      wallGuid,
     ]);
     assert.equal(parsed.topics[0].viewpoints[0].visibility_default, "false");
     assert.deepEqual(parsed.topics[0].viewpoints[0].visibility_exceptions, [
-      "0000000000000000000005",
+      wallGuid,
     ]);
 
     await callJsonTool(client, "show-ifc-file", {
-      file_path: sampleIfc,
+      file_path: exampleIfc,
     });
     const updated = await callJsonTool(client, "set-bcf-view", {
       bcf_path: bcfFile.url,
     });
 
-    assert.equal(updated.applied_to_open_viewer, true);
-    assert.equal(updated.has_bcf, true);
-    assert.equal(updated.bcf_topic_guid, parsed.topics[0].guid);
+    assert.equal(updated.isError, true);
+    assert.match(updated.content[0].text, /No browser viewer is connected/);
+
+    const colored = await callRunPython(client, {
+      files: [exampleIfc], code: extractPythonExample(setView.description, 1),
+    });
+
+    const colorFile = colored.saved_files.find(file => file.name === "colors.bcfzip");
+    assert.ok(colorFile, "Color example should save a BCFZIP");
+    const bytes = new Uint8Array(await (await fetch(colorFile.url)).arrayBuffer());
+    const colorTopics = await readBcfTopicsFromBytes(bytes);
+    assert.deepEqual(colorTopics.topics[0].viewpoints[0].colored_components, [{ color: "0088FF", global_ids: [wallGuid] }]);
+    const zip = await JSZip.loadAsync(bytes);
+    const xml = await Object.values(zip.files).find(file => file.name.endsWith(".bcfv")).async("string");
+    assert.match(xml, /<PerspectiveCamera>/);
+    assert.doesNotMatch(xml, /<Visibility/);
+
+    for (const index of [0, 1]) {
+      const empty = await callRunPython(client, {
+        files: [exampleIfc],
+        code: extractPythonExample(setView.description, index).replace('by_type("IfcWall")', 'by_type("IfcDoor")'),
+      });
+
+      assert.match(empty.stdout, /No walls found/);
+      assert.equal(empty.saved_files.length, 0, "No matches should not generate a viewpoint");
+    }
   });
 });
 
@@ -294,7 +312,6 @@ test(
       const snowdonName = path.basename(snowdonIfc);
       const output = await callRunPython(client, {
         files: [snowdonIfc],
-        timeout_seconds: 600,
         code: `
 import ifcopenshell
 import json
@@ -312,7 +329,6 @@ print(json.dumps({
 `,
       });
 
-      assert.equal(output.ok, true);
       const parsed = JSON.parse(output.stdout);
       assert.equal(parsed.schema, "IFC2X3");
       assert.equal(parsed.counts.IfcWall, 1078);
@@ -354,7 +370,7 @@ test("MCP viewer tools use one stable viewer URL and can update the same viewer"
     assert.equal(loaded.url, opened.url);
     assert.deepEqual(loaded.model_paths, [sampleIfc]);
     assert.equal(loaded.model_count, 1);
-    assert.equal(loaded.loaded_ifc_file, true);
+    assert.equal(loaded.loaded_ifc_file, false, "No connected viewer confirmed loading");
 
     const loadedAgain = await callJsonTool(client, "show-ifc-file", {
       file_path: sampleIfc,
@@ -363,19 +379,34 @@ test("MCP viewer tools use one stable viewer URL and can update the same viewer"
     assert.equal(loadedAgain.model_count, 1);
     assert.equal(loadedAgain.added_model, false);
 
-    const updated = await callJsonTool(client, "set-bcf-view", {
+    const exchange = (message = {}) => fetch(`${opened.url}/state`, {
+      method: "POST", headers: { Origin: opened.url, "Content-Type": "application/json" },
+      body: JSON.stringify(message),
+    });
+    assert.equal((await exchange()).status, 200);
+    const updating = callJsonTool(client, "set-bcf-view", {
       bcf_path: bcfPath,
     });
+    const state = await waitForViewerRequest(opened.url);
+    const result = toolError("BCF partly applied. One component was not found.");
+    assert.equal((await exchange({ id: state.request_id, result })).status, 200);
+    const updated = await updating;
 
-    assert.equal("session" in updated, false);
-    assert.equal(updated.url, opened.url);
-    assert.equal(updated.applied_to_open_viewer, true);
-    assert.equal(updated.has_bcf, true);
-    assert.equal(updated.bcf_version, 1);
-    assert.ok(updated.bcf_topic_guid);
-    assert.equal(updated.applied_bcf_path, bcfPath);
+    assert.equal(updated.isError, true);
+    assert.deepEqual(updated, result);
+    assert.equal(state.has_bcf, true);
+    assert.equal(state.bcf_version, 1);
+    assert.ok(state.bcf_topic_guid);
 
-    const cleared = await callJsonTool(client, "clear-ifc-viewer", {});
+    assert.equal((await exchange({ id: state.request_id, result: toolResult("Viewer updated.") })).status, 409);
+    assert.equal((await fetch(`${opened.url}/bcf-feedback`, { method: "POST" })).status, 404);
+    assert.equal((await fetch(`${opened.url}/state`, { method: "POST", body: "{}" })).status, 403);
+
+    const clearing = callJsonTool(client, "clear-ifc-viewer", {});
+    const clearState = await waitForViewerRequest(opened.url);
+    assert.notEqual(clearState.request_id, state.request_id);
+    assert.equal((await exchange({ id: clearState.request_id, result: toolResult("Viewer updated.") })).status, 200);
+    const cleared = await clearing;
     assert.equal(cleared.url, opened.url);
     assert.equal(cleared.cleared_viewer, true);
     assert.deepEqual(cleared.model_paths, []);
@@ -384,9 +415,18 @@ test("MCP viewer tools use one stable viewer URL and can update the same viewer"
   });
 });
 
+async function waitForViewerRequest(url) {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const state = await (await fetch(`${url}/state`)).json();
+    if (state.request_id) return state;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error("Viewer request was not queued.");
+}
+
 async function withMcpClient(callback) {
   const transport = new StdioClientTransport({
-    command: "node",
+    command: process.execPath,
     args: ["bin/ifc-mcp.js"],
     env: process.env,
   });
@@ -409,18 +449,18 @@ async function callJsonTool(client, name, args) {
       name,
       arguments: args,
     },
-    undefined,
     {
       timeout: 300_000,
       maxTotalTimeout: 360_000,
     },
   );
   assert.equal(result.content?.[0]?.type, "text");
-  return JSON.parse(result.content[0].text);
+  if (name === "run-python") assert.equal(result.isError, false, result.content[0].text);
+  return result.structuredContent ?? result;
 }
 
-function extractPythonExample(description) {
-  const match = String(description || "").match(/```python\n([\s\S]*?)\n```/);
+function extractPythonExample(description, index = 0) {
+  const match = [...String(description || "").matchAll(/```python\n([\s\S]*?)\n```/g)][index];
   assert.ok(match, "set-bcf-view description should include a Python code block");
   return match[1];
 }

@@ -6,8 +6,6 @@ import { pathToFileURL } from "node:url";
 import {
   DEFAULT_COPILOT_SDK_URL,
   DEFAULT_MAX_OUTPUT_CHARS,
-  DEFAULT_MAX_TIMEOUT_SECONDS,
-  DEFAULT_TIMEOUT_SECONDS,
   IFC_SUFFIXES,
 } from "./constants.js";
 import { resolvePath } from "./paths.js";
@@ -15,41 +13,29 @@ import { tokenUrlSafe, trimText } from "./utils.js";
 import { createDownloadUrl } from "./viewer.js";
 
 const sdkModuleCache = new Map();
+const runningSdks = new WeakSet();
 
 export async function executeIfcPython({
   code,
   files = [],
-  timeoutSeconds = DEFAULT_TIMEOUT_SECONDS,
   workingDirectory = null,
   maxOutputChars = DEFAULT_MAX_OUTPUT_CHARS,
   sdkUrl = DEFAULT_COPILOT_SDK_URL,
+  signal,
 }) {
+  signal?.throwIfAborted();
   if (!String(code || "").trim()) {
     throw new Error("code must not be empty");
-  }
-
-  if (timeoutSeconds < 1 || timeoutSeconds > DEFAULT_MAX_TIMEOUT_SECONDS) {
-    throw new Error(`timeout_seconds must be between 1 and ${DEFAULT_MAX_TIMEOUT_SECONDS}`);
   }
 
   const cwd = resolveWorkingDirectory(workingDirectory);
   const inputFiles = resolveInputFiles(files);
 
-  const timeout = timeoutAfter(timeoutSeconds);
-  const started = runSdk({
-    code,
-    inputFiles,
-    sdkUrl,
-  });
-
   try {
-    const output = await Promise.race([started, timeout.promise]);
-    timeout.cancel();
+    const output = await runSdk({ code, inputFiles, sdkUrl, signal });
     const streams = extractStreams(output);
     return {
       ok: output.runtimeStatus !== "error",
-      timed_out: false,
-      timeout_seconds: timeoutSeconds,
       exit_code: 0,
       result: output.result,
       stdout: trimText(streams.stdout, maxOutputChars),
@@ -65,28 +51,10 @@ export async function executeIfcPython({
         "Generated Python executed directly in Node through the Flinker Copilot SDK Pyodide runtime.",
     };
   } catch (error) {
-    timeout.cancel();
-    if (error?.code === "PYTHON_TIMEOUT") {
-      return {
-        ok: false,
-        timed_out: true,
-        timeout_seconds: timeoutSeconds,
-        exit_code: null,
-        result: null,
-        stdout: "",
-        stderr: "",
-        uploaded_files: inputFileMetas(inputFiles),
-        working_directory: cwd,
-        runner: "node_copilot_cdn",
-        sdk_url: sdkUrl,
-      };
-    }
     const output = serializeError(error);
     const streams = extractStreams(output);
     return {
       ok: false,
-      timed_out: false,
-      timeout_seconds: timeoutSeconds,
       exit_code: 1,
       result: null,
       stdout: trimText(streams.stdout, maxOutputChars),
@@ -102,30 +70,36 @@ export async function executeIfcPython({
   }
 }
 
-async function runSdk({ code, inputFiles, sdkUrl }) {
-  const sdk = await loadSdkModule(sdkUrl);
+async function runSdk({ code, inputFiles, sdkUrl, signal }) {
   const files = await buildSdkInputFiles(inputFiles);
-
-  const python = code;
-  if (typeof sdk.runPythonInWorker === "function") {
-    return runWithWorker(sdk, {
-      python,
-      files,
-      requestId: tokenUrlSafe(12),
-    });
+  const sdk = await loadSdkModule(sdkUrl);
+  signal?.throwIfAborted();
+  if (runningSdks.has(sdk)) throw new Error("The previous Python call is still running. Wait for it to finish.");
+  runningSdks.add(sdk);
+  let output;
+  try {
+    const requestId = tokenUrlSafe(12);
+    if (typeof sdk.runPythonInWorker === "function") {
+      output = await sdk.runPythonInWorker(code, files, { requestId, signal });
+      signal?.throwIfAborted();
+      return await formatWorkerOutput(output, files);
+    }
+    if (typeof sdk.copilot?.runPython === "function") {
+      const run = await sdk.copilot.runPython({ python: code, files, requestId, signal, preserveExistingFiles: false });
+      output = run.output;
+      signal?.throwIfAborted();
+      return await formatCopilotOutput(run, files);
+    }
+    throw new Error("Flinker Copilot SDK does not expose runPythonInWorker or copilot.runPython.");
+  } finally {
+    runningSdks.delete(sdk);
+    for (const file of [...(output?.files ?? []), ...(output?.displayFiles ?? [])]) {
+      if (file.url?.startsWith("blob:")) URL.revokeObjectURL(file.url);
+    }
   }
-  if (sdk.copilot && typeof sdk.copilot.runPython === "function") {
-    return runWithCopilot(sdk, {
-      python,
-      files,
-      requestId: tokenUrlSafe(12),
-    });
-  }
-  throw new Error("Flinker Copilot SDK does not expose runPythonInWorker or copilot.runPython.");
 }
 
-async function runWithWorker(sdk, { python, files, requestId }) {
-  const worker = await sdk.runPythonInWorker(python, files, { requestId });
+async function formatWorkerOutput(worker, files) {
   const rawResult = worker?.result;
   const output =
     rawResult && typeof rawResult === "object" && !Array.isArray(rawResult)
@@ -157,14 +131,8 @@ async function runWithWorker(sdk, { python, files, requestId }) {
   return output;
 }
 
-async function runWithCopilot(sdk, { python, files, requestId }) {
-  const run = await sdk.copilot.runPython({
-    python,
-    files,
-    preserveExistingFiles: false,
-    requestId,
-  });
-  const output = run && typeof run.output === "object" ? run.output : {};
+async function formatCopilotOutput(run, files) {
+  const output = run && typeof run.output === "object" ? { ...run.output } : {};
   const uploadedFiles = uploadedFileMetas(files);
   output.file = uploadedFiles[0] || null;
   output.filesUsed = uploadedFiles;
@@ -173,27 +141,23 @@ async function runWithCopilot(sdk, { python, files, requestId }) {
   return output;
 }
 
-async function loadSdkModule(sdkUrl) {
+function loadSdkModule(sdkUrl) {
   if (!sdkModuleCache.has(sdkUrl)) {
-    sdkModuleCache.set(sdkUrl, importSdkModule(sdkUrl));
+    sdkModuleCache.set(sdkUrl, importSdkModule(sdkUrl).catch(error => {
+      sdkModuleCache.delete(sdkUrl);
+      throw error;
+    }));
   }
   return sdkModuleCache.get(sdkUrl);
 }
 
 async function importSdkModule(sdkUrl) {
-  if (sdkUrl.startsWith("http://") || sdkUrl.startsWith("https://")) {
+  if (/^https?:/.test(sdkUrl)) {
     const response = await fetch(sdkUrl);
-    if (!response.ok) {
-      throw new Error(`Could not load Flinker Copilot SDK: ${response.status} ${response.statusText}`);
-    }
-    const source = await response.text();
-    const dataUrl = `data:text/javascript;base64,${Buffer.from(source, "utf8").toString("base64")}`;
-    return import(dataUrl);
+    if (!response.ok) throw new Error(`Could not load Flinker Copilot SDK: ${response.status} ${response.statusText}`);
+    return import(`data:text/javascript;base64,${Buffer.from(await response.text()).toString("base64")}`);
   }
-  if (path.isAbsolute(sdkUrl)) {
-    return import(pathToFileURL(sdkUrl).href);
-  }
-  return import(sdkUrl);
+  return import(path.isAbsolute(sdkUrl) ? pathToFileURL(sdkUrl).href : sdkUrl);
 }
 
 function resolveWorkingDirectory(workingDirectory) {
@@ -432,21 +396,6 @@ function inputFileMetas(files) {
     path: file.path,
     type: "application/octet-stream",
   }));
-}
-
-function timeoutAfter(timeoutSeconds) {
-  let handle;
-  const promise = new Promise((_, reject) => {
-    handle = setTimeout(() => {
-      const error = new Error(`Timed out after ${timeoutSeconds} seconds`);
-      error.code = "PYTHON_TIMEOUT";
-      reject(error);
-    }, timeoutSeconds * 1000);
-  });
-  return {
-    promise,
-    cancel: () => clearTimeout(handle),
-  };
 }
 
 function fsRealpathOrResolve(value) {

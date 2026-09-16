@@ -1,3 +1,4 @@
+import { bcfToolResult } from "./tool-results.js";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -129,11 +130,9 @@ export async function clearWithDesktopViewer({ view }) {
 
 export async function applyBcfStateWithDesktopViewer({
   view,
-  activeModel,
   bcfSource = null,
   bcfBytes = null,
   bcfFilename = "viewpoint.bcfzip",
-  bcfTopicGuid = null,
 }) {
   if (!isDesktopViewerMode()) {
     return null;
@@ -145,24 +144,8 @@ export async function applyBcfStateWithDesktopViewer({
     bytes: bcfBytes,
   });
   const desktopFilePaths = [...desktopModelPaths, desktopBcfPath].filter(Boolean);
-  const launch = await launchDesktopViewer({
-    filePaths: desktopFilePaths,
-  });
-
-  return {
-    ...desktopViewerResponse(view, {
-      addedModel: false,
-      activeModel,
-      launch,
-      desktopFilePaths,
-    }),
-    applied_to_open_viewer: true,
-    bcf_version: view.bcfVersion,
-    bcf_topic_guid: bcfTopicGuid || topicGuid(view),
-    applied_bcf_path: bcfSource?.path || null,
-    note:
-      "The Open IFC Viewer desktop app was launched or updated with this BCF state. Use show IFC file for model display and set BCF view only for BCF viewpoint files.",
-  };
+  await launchDesktopViewer({ filePaths: desktopFilePaths });
+  return bcfToolResult();
 }
 
 function desktopViewerConfig() {
