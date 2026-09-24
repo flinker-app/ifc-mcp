@@ -109,7 +109,8 @@ jobs:
         run: |
           set -euo pipefail
           package="${{ steps.version.outputs.package_name }}@${{ steps.version.outputs.package_version }}"
-          for attempt in {1..12}; do
+          # Allow roughly 10 minutes for npm registry propagation.
+          for attempt in {1..60}; do
             if npm view "$package" version >/dev/null 2>&1; then
               echo "$package is available on npm."
               exit 0
