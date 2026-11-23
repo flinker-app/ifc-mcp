@@ -13,8 +13,9 @@ export async function buildPythonRuntime(target) {
   const { info, packages } = JSON.parse(await fs.readFile(new URL("pyodide-lock.json", upstream), "utf8"));
   const extra = JSON.parse(await fs.readFile(new URL("./python-wheels.json", import.meta.url), "utf8"));
   const sources = new Map();
-  for (const [name, [url, sha256, dependencies, imports]] of Object.entries(extra)) {
-    const fileName = new URL(url).pathname.split("/").at(-1);
+  for (const [name, [source, sha256, dependencies, imports]] of Object.entries(extra)) {
+    const url = new URL(source, import.meta.url);
+    const fileName = url.pathname.split("/").at(-1);
     packages[name] = { name, file_name: fileName, version: fileName.split("-")[1], sha256,
       install_dir: "site", package_type: "package", imports,
       depends: dependencies.filter(dependency => dependency !== "ifcopenshell") };
@@ -29,7 +30,7 @@ export async function buildPythonRuntime(target) {
     selected[normalized] = entry;
     entry.depends.forEach(add);
   }
-  const ifcMcpPackages = [...Object.keys(extra), "pytest", "pyparsing", "python-dateutil"];
+  const ifcMcpPackages = [...Object.keys(extra), "pyparsing", "python-dateutil"];
   [...PYODIDE_PACKAGES, ...ifcMcpPackages].forEach(add);
 
   await fs.mkdir(target, { recursive: true });
@@ -46,6 +47,11 @@ export async function buildPythonRuntime(target) {
 
 async function loadPackage({ file_name: name, sha256 }, url) {
   const verify = bytes => createHash("sha256").update(bytes).digest("hex") === sha256;
+  if (url.protocol === "file:") {
+    const bytes = await fs.readFile(url);
+    if (!verify(bytes)) throw new Error(`Python package checksum mismatch: ${name}`);
+    return bytes;
+  }
   const cached = await fs.readFile(path.join(cache, name)).catch(error => {
     if (error.code !== "ENOENT") throw error;
   });

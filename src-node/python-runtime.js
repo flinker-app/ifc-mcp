@@ -29,7 +29,7 @@ export function createPythonExecutor({ loadPyodide, loadWheel, loadSources, inst
     if (installPackages) await installPackages(py);
     else await py.runPythonAsync(`
 import micropip
-await micropip.install(["lark==1.2.2", "isodate==0.7.2", "python-dateutil", "pyparsing", "bcf-client==${build.version.startsWith("0.9") ? "0.9.0" : "0.8.5"}", "ifcclash==${build.version.startsWith("0.9") ? "0.9.0" : "0.8.5"}", "plotly==5.24.1", "pytest==8.3.5"])
+await micropip.install(["lark==1.2.2", "isodate==0.7.2", "python-dateutil", "pyparsing", "bcf-client==${build.version.startsWith("0.9") ? "0.9.0" : "0.8.5"}", "ifcclash==${build.version.startsWith("0.9") ? "0.9.0" : "0.8.5"}", "plotly==5.24.1", "pytest==9.2.0"])
 `);
     await py.runPythonAsync(`
 import ifcopenshell, ifcopenshell.geom, ifcopenshell.validate, importlib.metadata

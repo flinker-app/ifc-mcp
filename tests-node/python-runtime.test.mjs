@@ -77,10 +77,12 @@ import ifcopenshell, ifcopenshell.api, ifcopenshell.geom, ifcopenshell.validate
 import numpy, pandas, matplotlib, shapely, bcf.v3.bcfxml, ifcclash, plotly, pytest
 import asyncio, importlib.metadata
 await asyncio.sleep(0)
-__assistant_result__ = {"version": importlib.metadata.version("ifcopenshell"), "runtime_version": ifcopenshell.version, "array": numpy.array([1, 2])}
+__assistant_result__ = {"version": importlib.metadata.version("ifcopenshell"), "runtime_version": ifcopenshell.version, "array": numpy.array([1, 2]), "pillow": importlib.metadata.version("Pillow")}
 print("ready", end="")
 `);
-    assert.deepEqual(output.result.result, { version: "0.9.1", runtime_version: "0.9.1", array: [1, 2] });
+    assert.deepEqual(output.result.result, {
+      version: "0.9.1", runtime_version: "0.9.1", array: [1, 2], pillow: "13.0.0",
+    });
     assert.equal(output.stdout, "ready");
     assert.equal((await run("6 * 7")).result.result, 42);
   });
@@ -112,6 +114,15 @@ Path("/tmp/grab.txt").write_text("explicit")
     const output = await run(`
 from IPython.display import HTML, Image, display
 import matplotlib.pyplot as plt
+from io import BytesIO
+from PIL import Image as PILImage
+for codec in ("PNG", "JPEG", "TIFF", "WEBP"):
+    image = BytesIO()
+    PILImage.new("RGB", (3, 4), "white").save(image, codec)
+    image.seek(0)
+    with PILImage.open(image) as opened:
+        opened.load()
+        assert opened.size == (3, 4)
 display(HTML("<b>hello</b>"))
 fig, ax = plt.subplots()
 ax.plot([0, 1], [0, 1])
