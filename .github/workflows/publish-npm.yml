@@ -46,6 +46,19 @@ jobs:
       - name: Test installed desktop sandbox
         if: runner.os != 'Windows'
         run: npm run test:installed
+      - name: Report macOS sandbox failures
+        if: failure() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          sudo -n /usr/bin/log show --last 5m --style compact --info \
+            --predicate '(eventMessage CONTAINS[c] "node" OR eventMessage CONTAINS[c] "sandbox-exec") AND (eventMessage CONTAINS[c] "deny" OR eventMessage CONTAINS[c] "dyld" OR eventMessage CONTAINS[c] "code sign")' \
+            | tail -n 80 || true
+          for reports in "$HOME/Library/Logs/DiagnosticReports" /Library/Logs/DiagnosticReports; do
+            if [ -d "$reports" ]; then
+              find "$reports" -maxdepth 1 -name 'node*.ips' -mmin -10 \
+                -exec grep -E '^ *"(exception|termination|asi|faultingThread)"' {} + || true
+            fi
+          done
       - uses: actions/upload-artifact@v4
         if: runner.os != 'macOS' && matrix.os != 'ubuntu-24.04'
         with:
