@@ -16,9 +16,13 @@ vendor/ifcopenshell/single-thread-clash.patch. OpenCascade's LGPL 2.1 license an
 exception are in vendor/ifcopenshell/licenses/. The build uses Boost (BSL-1.0)
 and Eigen (MPL-2.0) headers.
 
-- Pyodide (MPL-2.0) — https://github.com/pyodide/pyodide
+- Pyodide 0.28.3 (MPL-2.0) — https://github.com/pyodide/pyodide/tree/0.28.3
 - IfcOpenShell, bcf-client, and ifcclash (LGPL-3.0-or-later) — https://github.com/IfcOpenShell/IfcOpenShell
 - IfcOpenShell WASM wheels — https://github.com/IfcOpenShell/wasm-wheels
+
+Python runtime wheels carry their upstream licenses inside each wheel. The
+bundled Linux sandbox launcher statically links musl libc. Its copyright and
+license are shipped alongside the launcher in dist/sandbox/.
 
 npm dependencies keep their own upstream licenses. See package-lock.json for
 the dependency tree and resolved package versions.

@@ -1,0 +1,9 @@
+{
+  "bcf-client": ["https://files.pythonhosted.org/packages/b2/7d/21fa18386b08bf73ee28600aa578e5ccd23bc8760cafe1cdbc94c798f6cc/bcf_client-0.9.0-py3-none-any.whl","68915ee2633e9b683ed122a90a7f3fbeca1e4af8a0bf3e0623499d16c616c3f5",["ifcopenshell","numpy","requests","xsdata"],["bcf"]],
+  "ifcclash": ["https://files.pythonhosted.org/packages/d4/1a/065c5e8a8f40dbe481785bb0c89436742b47c759e88cee49970197cb62e4/ifcclash-0.9.0-py3-none-any.whl","ebfaae128605521f198bdd3f8b94059560f464ec9a7f5a03038666da322be96d",["ifcopenshell"],["ifcclash"]],
+  "isodate": ["https://files.pythonhosted.org/packages/15/aa/0aca39a37d3c7eb941ba736ede56d689e7be91cab5d9ca846bde3999eba6/isodate-0.7.2-py3-none-any.whl","28009937d8031054830160fce6d409ed342816b543597cece116d966c6d99e15",[],["isodate"]],
+  "lark": ["https://files.pythonhosted.org/packages/2d/00/d90b10b962b4277f5e64a78b6609968859ff86889f5b898c1a778c06ec00/lark-1.2.2-py3-none-any.whl","c2276486b02f0f1b90be155f2c8ba4a8e194d42775786db622faccd652d8e80c",[],["lark"]],
+  "plotly": ["https://files.pythonhosted.org/packages/e5/ae/580600f441f6fc05218bd6c9d5794f4aef072a7d9093b291f1c50a9db8bc/plotly-5.24.1-py3-none-any.whl","f67073a1e637eb0dc3e46324d9d51e2fe76e9727c892dde64ddf1e1b51f29089",["packaging","tenacity"],["_plotly_future_","_plotly_utils","jupyterlab_plotly","plotly"]],
+  "tenacity": ["https://files.pythonhosted.org/packages/d6/26/1ff2b0721ac66a3ec5b1402b333110b352ab0a8724052ac279a7b82d40c4/tenacity-9.2.1-py3-none-any.whl","9e56f17539296baab7beabb08b92f6ee3d7be92d8be72d763360677c2ad6580e",[],[]],
+  "xsdata": ["https://files.pythonhosted.org/packages/07/fe/5a9698cef0850317de2a8f3c50519fbaa2cc4225d15bcfe9922e4dff8380/xsdata-26.10-py3-none-any.whl","37a697d60db1396a0431750486744a7e0491fd60669751d95e3ede08f034e0c6",["typing-extensions"],["xsdata"]]
+}

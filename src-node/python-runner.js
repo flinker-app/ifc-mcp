@@ -16,6 +16,7 @@ const runningRuntimes = new WeakSet();
 export async function executeIfcPython({
   code,
   files = [],
+  attachments = null,
   workingDirectory = null,
   maxOutputChars = DEFAULT_MAX_OUTPUT_CHARS,
   runtime = localPython,
@@ -27,7 +28,7 @@ export async function executeIfcPython({
   }
 
   const cwd = resolveWorkingDirectory(workingDirectory);
-  const inputFiles = resolveInputFiles(files);
+  const inputFiles = attachments === null ? resolveInputFiles(files) : resolveAttachments(attachments);
 
   try {
     const output = await runRuntime({ code, inputFiles, runtime, signal });
@@ -67,7 +68,7 @@ export async function executeIfcPython({
 }
 
 async function runRuntime({ code, inputFiles, runtime, signal }) {
-  const files = await buildRuntimeInputFiles(inputFiles);
+  const files = await buildRuntimeInputFiles(inputFiles, runtime === localPython);
   signal?.throwIfAborted();
   if (runningRuntimes.has(runtime)) throw new Error("The previous Python call is still running. Wait for it to finish.");
   runningRuntimes.add(runtime);
@@ -162,10 +163,16 @@ function resolveInputFiles(files) {
   });
 }
 
-async function buildRuntimeInputFiles(inputFiles) {
+async function buildRuntimeInputFiles(inputFiles, onDisk) {
   const files = [];
   for (const inputFile of inputFiles) {
-    const fileBytes = await fs.readFile(inputFile.path);
+    const localPath = inputFile.localPath ?? inputFile.path;
+    if (onDisk) {
+      files.push({ name: inputFile.name, localPath, size: inputFile.size ?? (await fs.stat(localPath)).size,
+        sourcePath: inputFile.path, type: "application/octet-stream" });
+      continue;
+    }
+    const fileBytes = await fs.readFile(localPath);
     files.push({
       name: inputFile.name,
       buffer: fileBytes.buffer.slice(
@@ -178,6 +185,16 @@ async function buildRuntimeInputFiles(inputFiles) {
     });
   }
   return files;
+}
+
+function resolveAttachments(attachments) {
+  const usedNames = new Set();
+  return attachments.map(({ name, localPath, size_bytes, tool_path }, index) => ({
+    name: uniqueInputFileName(name, usedNames, index + 1),
+    path: tool_path,
+    localPath,
+    size: size_bytes,
+  }));
 }
 
 function uniqueInputFileName(baseName, usedNames, fallbackIndex) {

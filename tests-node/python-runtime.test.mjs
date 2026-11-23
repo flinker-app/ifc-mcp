@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { createServer } from "node:http";
 import test from "node:test";
 import { runPythonInWorker, closePythonRuntime } from "../src-node/python-local.js";
@@ -29,7 +31,40 @@ test("failed Python initialization can be retried", async () => {
   await assert.rejects(execute("pass"), /initialization 2/);
 });
 
-test("real local Python environment supports the pinned IfcOpenShell build", { timeout: 180_000 }, async t => {
+test("desktop Python reads ranges of a large input from disk", { timeout: 180_000 }, async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "ifc-mcp-large-input-"));
+  const localPath = path.join(dir, "large.ifc");
+  t.after(async () => {
+    closePythonRuntime();
+    await fs.unlink(localPath);
+    await fs.rmdir(dir);
+  });
+  const size = 256 * 1024 * 1024;
+  const file = await fs.open(localPath, "wx");
+  try {
+    await file.write("BEGIN", 0);
+    await file.write("END", size - 3);
+  } finally { await file.close(); }
+  const measure = "from js import process\nresult = process.memoryUsage().arrayBuffers";
+  const baseline = await runPythonInWorker(measure);
+  assert.equal(baseline.result.runtimeStatus, "completed", baseline.stderr);
+  const memoryCode = `
+import os
+with open('large.ifc', 'rb') as model:
+    assert os.fstat(model.fileno()).st_size == ${size}
+    assert model.read(5) == b'BEGIN'
+    model.seek(-3, 2)
+    assert model.read() == b'END'
+${measure}
+`;
+  const output = await runPythonInWorker(memoryCode, [{ name: "large.ifc", localPath }]);
+  assert.equal(output.result.runtimeStatus, "completed", output.stderr);
+  const addedBytes = output.result.result - baseline.result.result;
+  assert.ok(addedBytes < size / 2, `Input added ${addedBytes} bytes of ArrayBuffers`);
+  assert.deepEqual(output.files, []);
+});
+
+test("real local Python environment supports the pinned IfcOpenShell build", { timeout: 480_000 }, async t => {
   t.after(closePythonRuntime);
   const run = async (code, files = [], options) => {
     const output = await runPythonInWorker(code, files, options);

@@ -27,7 +27,8 @@ const test = base.extend({
       await page.goto(url);
       await connected;
       await page.evaluate(() => window.ifcMcpViewer.ready);
-      await use({ client, url, call: (name, args = {}) => client.callTool({ name, arguments: args }, { timeout: 60_000 }) });
+      await use({ client, url, filePickerUrl: opened.structuredContent.file_picker_url,
+        call: (name, args = {}) => client.callTool({ name, arguments: args }, { timeout: name === "run-python" ? 180_000 : 60_000 }) });
     } finally {
       await page.goto("about:blank").catch(() => {});
       await client.close();
@@ -46,6 +47,7 @@ const test = base.extend({
 });
 
 test("published viewer renders IFC, survives reload and round-trips BCF state", async ({ page, mcp }, testInfo) => {
+  test.setTimeout(240_000);
   const pageErrors = [];
   page.on("pageerror", error => pageErrors.push(error.message));
   const opened = await mcp.call("show-ifc-file", { file_path: wallPath });
@@ -64,8 +66,15 @@ test("published viewer renders IFC, survives reload and round-trips BCF state", 
   expect(reloaded.structuredContent.url).toBe(mcp.url);
   expect(reloaded.structuredContent.model_count).toBe(1);
 
+  const picker = await page.context().newPage();
+  await picker.goto(mcp.filePickerUrl);
+  await expect(picker.locator("input[type=file]")).toBeEnabled();
+  await picker.locator("input[type=file]").setInputFiles(wallPath);
+  await expect(picker.getByRole("status")).toHaveText("Files are ready to use in IFC MCP.");
+  const toolPath = await picker.locator("code").innerText();
+  await picker.close();
   const created = await mcp.call("run-python", {
-    files: [wallPath],
+    files: [toolPath],
     code: `
 from uuid import uuid4
 

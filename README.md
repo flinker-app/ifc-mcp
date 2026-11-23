@@ -38,14 +38,16 @@ or stopping IFC MCP closes the server and expires its temporary download links.
 Large IFC files can take more than a minute to process. Cancelling a request
 terminates its local Python worker. The next call starts a fresh runtime.
 
-The Python runner and its WASM compatibility helpers live in this repository;
-the Flinker Copilot SDK is no longer downloaded or evaluated. Node uses the
-pinned `pyodide` npm package (0.28.3). The package includes the checksum-verified
-IfcOpenShell wheel. Other Python dependencies download on first use; Node caches
-the WASM assets locally.
-The browser entry uses the same Python source and a local Web Worker.
+The package includes Pyodide 0.28.3, the checksum-verified IfcOpenShell wheel,
+and the other Python packages needed for offline execution. `run-python` starts
+a fresh sandbox for each call. The desktop CLI uses the platform sandbox, and
+the browser entry runs Python in a sandboxed iframe with its own worker.
 
 IFC MCP accepts IFC and IFCZIP files.
+
+For local analysis, give your assistant the file path. A client with local
+terminal access can hand the file to IFC MCP using its existing permissions.
+If the handoff is unavailable, you can select the file using the picker link.
 
 Use `run-python` with `bcf-client` to create BCF viewpoints, including
 orthographic cameras. The connected browser viewer returns a rendered screenshot
@@ -61,6 +63,10 @@ reopen the app where you want to use IFC MCP.
 
 IFC MCP uses `npx`, which is included with Node.js. If your app later says
 `node` or `npx` is not found, reinstall Node.js LTS and reopen the app.
+
+On Linux x64 and ARM64, `run-python` uses the bundled sandbox launcher and
+requires a Linux 5.13 or newer kernel with Landlock enabled. No additional
+runtime package is needed.
 
 ### 2. Choose your client
 
@@ -335,9 +341,15 @@ must return an MCP tool result describing whether the viewpoint was applied.
 Use `host.tools` for the tool definitions and `host.getGeneratedFiles()` for
 generated downloads. Call `host.clearFiles()` when those downloads are no longer needed.
 
+When serving the built browser entry, serve `python-worker-browser.js` and the
+`python/` directory beside it. The sandbox loads these assets before executing
+Python. The browser host must allow a sandboxed iframe and a blob worker.
+
 </details>
 
 ## Local Development
+
+Linux source builds use GCC and musl-tools to compile the sandbox launcher.
 
 For local development from this checkout:
 
@@ -368,16 +380,40 @@ round trips, verifies recovery from invalid IFC, and checks port cleanup.
 It needs access to the pinned viewer SDK on Flinker's CDN. Failure screenshots,
 traces, and the HTML report are saved under `.ifc-mcp/`.
 
+After building, `npm run test:installed` installs a local tarball and tests the
+desktop sandbox. Add `-- --browser` to test the browser sandbox from the same
+tarball. The release workflow runs the desktop test on Windows, macOS and Linux
+before publishing.
+
+To compare resource use with another checkout, install its npm dependencies and
+run `npm run benchmark:ifcopenshell -- --memory <checkout> [model.ifc ...]`.
+The benchmark measures average and peak resident memory and CPU use across the
+MCP server, its sandbox workers and the terminal handoff. On Windows it also
+records private memory, GPU utilization, and shared and dedicated GPU memory.
+It reads small ranges of a 256 MiB fixture and parses the supplied IFC models. Set
+`IFC_BENCHMARK_MEMORY_MIB` to change the range fixture size. Results are written
+to `.ifc-mcp/ifcopenshell-memory-benchmark.json`.
+
 ## Security
 
 IFC MCP keeps the IFC work on your own machine. It reads your IFC files locally,
 runs the IFC analysis locally, and opens a local viewer. It does not publish the
 viewer to the public internet.
 
-Generated reports, BCF files, and IFC files are temporary local download links.
-IFC MCP does not write generated output files into your project folder by
-default.
+Python receives copies of the files provided for the run and writes its outputs
+in a temporary workspace. The sandbox blocks network requests, reads of other
+user file contents, and changes to host files. On Linux, the kernel can still
+expose basic file metadata such as whether a named path exists. Generated
+reports, BCF files, and IFC files are returned as temporary local downloads.
+Choose where to save them.
 
-Use IFC MCP only with IFC/BIM files and project folders you trust. It can read
-the files you ask it to use, and incorrect or misleading model data can lead to
-wrong reports or generated IFC files.
+The desktop handoff streams inputs into private temporary storage on the same
+machine. The client needs permission to read the source file and connect to IFC
+MCP on localhost. IFC MCP removes automatic handoffs after each run and expires
+unused handoffs after five minutes. Files selected in the picker stay available
+for the session or until you remove them.
+Python reads only the parts it requests. The browser worker reads slices of the
+selected file directly. IfcOpenShell can still use substantial memory to parse a
+large model or build its geometry.
+
+The desktop viewer tools accept local model and BCF paths for viewing.

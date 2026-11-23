@@ -19,25 +19,29 @@
     "THIRD_PARTY_NOTICES",
     "vendor/ifcopenshell/single-thread-clash.patch",
     "vendor/ifcopenshell/licenses/",
+    "vendor/pyodide/LICENSE",
     "docs/ifc-mcp-demo-thumbnail.jpg",
     "dist/browser.js",
     "dist/ifc-mcp.js",
     "dist/server.js",
-    "dist/python-worker-node.js",
+    "dist/python-worker-node.mjs",
     "dist/python-worker-browser.js",
     "dist/python/",
+    "dist/sandbox/",
     "dist/tool-results.js",
     "dist/tool-results.d.ts",
-    "dist/static/viewer.html"
+    "dist/static/"
   ],
   "scripts": {
     "build": "node scripts/build-package.mjs",
     "sync-metadata": "node scripts/sync-server-metadata.mjs",
     "prepack": "npm run build",
+    "pretest": "npm run build",
     "start": "node ./bin/ifc-mcp.js",
     "test": "node --test --test-concurrency=1 tests-node/python-runtime.test.mjs tests-node/ifc-mcp.test.mjs tests-node/viewer-lifecycle.test.mjs tests-node/viewer-http.test.mjs tests-node/benchmark-source.test.mjs tests-node/stdio-resilience.test.mjs tests-node/downloads.test.mjs tests-node/mcp-tools.test.mjs tests-node/browser-host.test.mjs tests-node/bcf-colors.test.mjs tests-node/tool-results.test.mjs tests-node/protocol.test.mjs",
     "pretest:browser": "npm run build",
     "test:browser": "playwright test",
+    "test:installed": "node scripts/test-installed-package.mjs",
     "test:prompts": "node --test --test-concurrency=1 tests-node/prompts.eval.mjs",
     "benchmark:ifcopenshell": "node scripts/benchmark-ifcopenshell.mjs",
     "check:wasm": "node scripts/check-ifcopenshell-wasm.mjs"
@@ -74,12 +78,12 @@
     "@modelcontextprotocol/server": "2.4.0",
     "fast-xml-parser": "^5.12.1",
     "jszip": "^3.10.1",
-    "pyodide": "0.28.3",
     "zod": "^4.6.7"
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "^2.4.0",
     "@playwright/test": "1.63.0",
-    "esbuild": "^0.28.1"
+    "esbuild": "^0.28.1",
+    "pyodide": "0.28.3"
   }
 }

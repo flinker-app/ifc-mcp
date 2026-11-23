@@ -18,12 +18,13 @@ export function createServer({
   python = null,
   context = {},
   onCall = null,
+  fileHandoffEntry = null,
   timeoutMs,
   maxConcurrentCalls,
 } = {}) {
   configureDesktopViewer(desktopViewer);
 
-  const defaultHandlers = createDefaultIfcMcpToolHandlers();
+  const defaultHandlers = createDefaultIfcMcpToolHandlers(fileHandoffEntry);
   const hostHandlers = createIfcMcpHostHandlers({ viewer, python });
   const toolHost = createIfcMcpToolHost({
     defaultHandlers: {

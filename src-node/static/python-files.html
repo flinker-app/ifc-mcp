@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Allow Python to use IFC files</title>
+  <style>
+    body { font: 1rem system-ui, sans-serif; color-scheme: light dark; margin: 3rem auto; padding: 0 1rem; max-width: 45rem; }
+    li { margin: .75rem 0; overflow-wrap: anywhere; }
+    button { margin-left: .5rem; }
+    code { display: block; }
+  </style>
+</head>
+<body>
+  <h1>Allow Python to use IFC files</h1>
+  <p>Choose the files Python may use during this IFC MCP session.</p>
+  <input id="files" aria-label="Choose IFC or IFCZIP files" type="file" accept=".ifc,.ifczip" multiple>
+  <p id="status" role="status"></p>
+  <ul id="approved"></ul>
+  <script>
+    const token = location.hash.slice(1);
+    const chooser = document.querySelector("#files");
+    const list = document.querySelector("#approved");
+    const status = document.querySelector("#status");
+
+    async function request({ method = "GET", query = "", file } = {}) {
+      const headers = { "X-IFC-Python-File-Token": token };
+      if (file) headers["X-IFC-File-Name"] = encodeURIComponent(file.name);
+      const response = await fetch(`/python-files/approved${query}`, { method, headers, body: file });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error);
+      return data;
+    }
+
+    async function refresh() {
+      const { files } = await request();
+      list.replaceChildren(...files.map(({ name, tool_path }) => {
+        const item = document.createElement("li");
+        const id = document.createElement("code");
+        id.textContent = tool_path;
+        const remove = document.createElement("button");
+        remove.textContent = "Remove";
+        remove.onclick = async () => {
+          try {
+            await request({ method: "DELETE", query: `?id=${encodeURIComponent(tool_path)}` });
+            await refresh();
+            status.textContent = `Removed ${name}.`;
+          } catch (error) { status.textContent = error.message; }
+        };
+        item.append(name, remove, id);
+        return item;
+      }));
+    }
+
+    chooser.addEventListener("change", async () => {
+      chooser.disabled = true;
+      const errors = [];
+      for (const file of chooser.files) {
+        status.textContent = `Adding ${file.name}…`;
+        try { await request({ method: "POST", file }); }
+        catch (error) { errors.push(`${file.name}: ${error.message}`); }
+      }
+      chooser.value = "";
+      chooser.disabled = false;
+      try {
+        await refresh();
+        status.textContent = errors.join(" ") || "Files are ready to use in IFC MCP.";
+      } catch (error) { status.textContent = error.message; }
+    });
+
+    refresh().catch(error => { chooser.disabled = true; status.textContent = error.message; });
+  </script>
+</body>
+</html>

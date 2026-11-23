@@ -1,29 +1,39 @@
-import { IFCOPENSHELL_BUILD, PYODIDE_INDEX_URL } from "./constants.js";
-import { downloadWheel } from "./python-assets.js";
 import { createPythonExecutor } from "./python-runtime.js";
 
-const execute = createPythonExecutor({
-  loadPyodide: async options => {
-    const { loadPyodide } = await import(/* @vite-ignore */ `${PYODIDE_INDEX_URL}pyodide.mjs`);
-    return loadPyodide({ ...options, indexURL: PYODIDE_INDEX_URL });
-  },
-  // The upstream build bucket has no browser CORS headers. Serve the verified
-  // wheel packaged beside this worker, using the same pinned checksum as Node.
-  loadWheel: () => downloadWheel({ ...IFCOPENSHELL_BUILD,
-    sha256: IFCOPENSHELL_BUILD.packagedSha256,
-    url: new URL("./python/ifcopenshell.whl", import.meta.url).href }),
-  loadSources: async () => Object.fromEntries(await Promise.all(
-    ["display.py", "execution.py", "ifcopenshell_compat.py"].map(async name => {
-      const response = await fetch(new URL(`./python/${name}`, import.meta.url));
-      if (!response.ok) throw new Error(`Could not load Python helper ${name}: ${response.status}`);
-      return [name, await response.text()];
-    }))),
-});
-self.addEventListener("message", async ({ data: { id, code, files, options } }) => {
+// The sandboxed frame supplies trusted runtime assets before running user code.
+// The Worker inherits its frame's policy, so browser networking is also blocked
+// if Python reaches JavaScript APIs or starts a nested Worker.
+self.addEventListener("message", async ({ data }) => {
+  const { binaries, lock, wheel, sources, code, files, options } = data;
+  const runtimeUrl = "https://ifc-mcp.invalid/";
+  const assets = new Map(binaries.map(([name, bytes]) => [new URL(name, runtimeUrl).href, bytes]));
+  self.fetch = async resource => {
+    const url = String(resource instanceof Request ? resource.url : resource);
+    const bytes = assets.get(url);
+    if (!bytes) throw new TypeError("Python sandbox blocks network access.");
+    return new Response(bytes, { headers: { "Content-Type": url.endsWith(".wasm")
+      ? "application/wasm" : "application/octet-stream" } });
+  };
   try {
-    const onProgress = progress => self.postMessage({ ...progress, id, type: "progress" });
-    self.postMessage({ id, output: await execute(code, files, { ...options, onProgress }) });
+    const execute = createPythonExecutor({
+      loadPyodide: options => self.loadPyodide({ ...options, lockFileContents: lock,
+        indexURL: runtimeUrl, packageBaseUrl: runtimeUrl }),
+      loadWheel: async () => new Uint8Array(await wheel.arrayBuffer()),
+      loadSources: () => sources,
+      installPackages: py => py.loadPackage(lock.ifcMcpPackages),
+    });
+    const reader = new FileReaderSync();
+    const attachments = files.map(({ name, blob }) => ({
+      name, size: blob.size,
+      readInto(buffer, offset, length, position) {
+        const bytes = new Uint8Array(reader.readAsArrayBuffer(blob.slice(position, position + length)));
+        buffer.set(bytes, offset);
+        return bytes.length;
+      },
+    }));
+    const onProgress = progress => self.postMessage({ progress });
+    self.postMessage({ output: await execute(code, attachments, { ...options, onProgress }) });
   } catch (error) {
-    self.postMessage({ id, error: { message: error.message || String(error), stdout: error.stdout || "", stderr: error.stderr || "", fatal: Boolean(error.pyodide_fatal_error) } });
+    self.postMessage({ error: error.message || String(error), stderr: error.stderr || "" });
   }
-});
+}, { once: true });

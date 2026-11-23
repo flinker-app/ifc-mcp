@@ -1,14 +1,17 @@
 // This module runs inside the platform worker. It owns initialization, the
 // virtual filesystem, per-call namespaces, result conversion and file capture.
 import { IFCOPENSHELL_BUILD } from "./constants.js";
+import { attachPythonInput } from "./python-input-file.js";
 
 const OUT_DIR = "/home/pyodide";
 
-export function createPythonExecutor({ loadPyodide, loadWheel, loadSources, build = IFCOPENSHELL_BUILD }) {
+export const PYODIDE_PACKAGES = ["micropip", "numpy", "pandas", "matplotlib", "shapely", "typing-extensions"];
+
+export function createPythonExecutor({ loadPyodide, loadWheel, loadSources, installPackages, build = IFCOPENSHELL_BUILD }) {
   let ready;
   async function initialize() {
     const py = await loadPyodide({ stdout: () => {}, stderr: () => {} });
-    await py.loadPackage(["micropip", "numpy", "pandas", "matplotlib", "shapely", "typing-extensions"], {
+    await py.loadPackage(PYODIDE_PACKAGES, {
       messageCallback: () => {}, errorCallback: () => {},
     });
     const sitePackages = py.runPython('import site; site.getsitepackages()[0]');
@@ -23,9 +26,12 @@ export function createPythonExecutor({ loadPyodide, loadWheel, loadSources, buil
         global: true, nodelete: true, allowUndefined: true, loadAsync: true,
       });
     }
-    await py.runPythonAsync(`
+    if (installPackages) await installPackages(py);
+    else await py.runPythonAsync(`
 import micropip
 await micropip.install(["lark==1.2.2", "isodate==0.7.2", "python-dateutil", "pyparsing", "bcf-client==${build.version.startsWith("0.9") ? "0.9.0" : "0.8.5"}", "ifcclash==${build.version.startsWith("0.9") ? "0.9.0" : "0.8.5"}", "plotly==5.24.1", "pytest==8.3.5"])
+`);
+    await py.runPythonAsync(`
 import ifcopenshell, ifcopenshell.geom, ifcopenshell.validate, importlib.metadata
 assert importlib.metadata.version("ifcopenshell") == ${JSON.stringify(build.version)}
 # Some official nightly wheels leave a packaging placeholder in __init__.py.
@@ -71,8 +77,8 @@ for name in ("Clasher", "ClashSettings", "ClashResult", "ClashSet", "ClashSource
       if (!name || name === "." || name === ".." || name.includes("\0")) throw new Error("Invalid Python input filename");
       if (names.has(name)) throw new Error(`Duplicate Python input filename: ${name}`);
       names.add(name);
-      py.FS.writeFile(`${OUT_DIR}/${name}`, new Uint8Array(attachment.buffer));
-      before.set(`${OUT_DIR}/${name}`, new Uint8Array(attachment.buffer));
+      const filePath = `${OUT_DIR}/${name}`;
+      before.set(filePath, attachPythonInput(py.FS, filePath, attachment));
     }
     try {
       options.onProgress?.({ stage: "running-code", message: "Running Python code" });
@@ -80,15 +86,15 @@ for name in ("Clasher", "ClashSettings", "ClashResult", "ClashSet", "ClashSource
       py.globals.set("_ifc_mcp_options", JSON.stringify(options));
       const output = JSON.parse(await py.runPythonAsync("await _ifc_mcp_execute(_ifc_mcp_code, _ifc_mcp_options)"));
       const files = [];
-      const captured = snapshot(py.FS);
+      const captured = snapshot(py.FS, before);
       // 'grab' is an internal runtime option, for explicit files outside cwd.
       for (const item of options.grab || []) {
         const filePath = item.startsWith("/") ? item : `${OUT_DIR}/${item}`;
-        if (!captured.has(filePath)) captured.set(filePath, py.FS.readFile(filePath));
+        if (!captured.has(filePath) && !before.get(filePath)?.sameContents(py.FS, filePath, py.FS.stat(filePath).size)) {
+          captured.set(filePath, py.FS.readFile(filePath));
+        }
       }
       for (const [filePath, bytes] of captured) {
-        const original = before.get(filePath);
-        if (original && equalBytes(original, bytes)) continue;
         files.push({ path: filePath, blob: new Blob([bytes], { type: mimeType(filePath) }) });
       }
       // MCP consumers receive rich displays as downloadable artifacts, too.
@@ -108,7 +114,7 @@ for name in ("Clasher", "ClashSettings", "ClashResult", "ClashSet", "ClashSource
   };
 }
 
-function snapshot(fs) {
+function snapshot(fs, before) {
   const files = new Map();
   function visit(directory) {
     for (const name of fs.readdir(directory)) {
@@ -116,17 +122,13 @@ function snapshot(fs) {
       const filePath = `${directory}/${name}`;
       const stat = fs.lstat(filePath);
       if (fs.isDir(stat.mode)) visit(filePath);
-      else if (fs.isFile(stat.mode)) files.set(filePath, fs.readFile(filePath));
+      else if (fs.isFile(stat.mode) && !before.get(filePath)?.sameContents(fs, filePath, stat.size)) {
+        files.set(filePath, fs.readFile(filePath));
+      }
     }
   }
   visit(OUT_DIR);
   return files;
-}
-
-function equalBytes(first, second) {
-  if (first.length !== second.length) return false;
-  for (let index = 0; index < first.length; index++) if (first[index] !== second[index]) return false;
-  return true;
 }
 
 function mimeType(name) {

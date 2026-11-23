@@ -3,6 +3,8 @@ import { bcfToolResult } from "./tool-results.js";
 
 let requestSequence = 0;
 const runningRuntimes = new WeakSet();
+const passiveDownloadTypes = new Set(["text/plain", "text/csv", "application/json", "application/zip",
+  "application/x-step", "image/jpeg", "image/png", "application/octet-stream"]);
 
 function createRequestId() {
   if (typeof globalThis.crypto?.randomUUID === "function") return globalThis.crypto.randomUUID();
@@ -17,16 +19,20 @@ export function createIfcMcpBrowserRuntime({ files, viewer,
   const generated = new Map();
   let running = false;
 
-  async function resolveFile(reference) {
+  function resolveSource(reference) {
     const saved = Array.from(generated.values()).find(({ file, path }) =>
       reference === file.url || reference === file.name || reference === path);
-    if (saved) return { name: saved.file.name, bytes: new Uint8Array(await saved.blob.arrayBuffer()) };
+    if (saved) return { name: saved.file.name, source: saved.blob };
     const input = files.get(reference);
     if (!input) throw new Error(`Browser-local file not found: ${reference}`);
     const source = input.bytes ?? input.source;
     if (!source) throw new Error(`File contents are unavailable: ${reference}`);
-    return { name: input.name, bytes: source instanceof Blob
-      ? new Uint8Array(await source.arrayBuffer()) : new Uint8Array(source) };
+    return { name: input.name, source };
+  }
+
+  async function resolveFile(reference) {
+    const { name, source } = resolveSource(reference);
+    return { name, bytes: await readBytes(source) };
   }
 
   async function runPython({ code, files: references, signal }) {
@@ -36,10 +42,11 @@ export function createIfcMcpBrowserRuntime({ files, viewer,
     let activeSdk;
     let output;
     try {
-      const inputs = await Promise.all(references.map(resolveFile));
-      // Transfer copies to the local worker so the viewer keeps its original bytes.
-      const attachments = inputs.map(({ name, bytes }) => ({ name, buffer: bytes.buffer }));
+      const inputs = references.map(resolveSource);
       const sdk = await loadPython();
+      const attachments = sdk.acceptsFileBlobs
+        ? inputs.map(({ name, source }) => ({ name, blob: source instanceof Blob ? source : new Blob([source]) }))
+        : await Promise.all(inputs.map(async ({ name, source }) => ({ name, buffer: (await readBytes(source)).buffer })));
       signal?.throwIfAborted();
       if (runningRuntimes.has(sdk)) throw new Error("The previous Python call is still running. Wait for it to finish.");
       runningRuntimes.add(sdk);
@@ -53,7 +60,8 @@ export function createIfcMcpBrowserRuntime({ files, viewer,
         if (!(blob instanceof Blob)) continue;
         const previous = generated.get(name);
         if (previous) URL.revokeObjectURL(previous.file.url);
-        const file = { name, size: blob.size, mimeType: blob.type, url: item.url || URL.createObjectURL(blob) };
+        const download = passiveDownloadTypes.has(blob.type) ? blob : new Blob([blob], { type: "application/octet-stream" });
+        const file = { name, size: blob.size, mimeType: blob.type, url: item.url || URL.createObjectURL(download) };
         generated.set(name, { file, blob, path: item.path || name });
         savedFiles.push(file);
       }
@@ -105,4 +113,8 @@ export function createIfcMcpBrowserRuntime({ files, viewer,
       generated.clear();
     },
   };
+}
+
+async function readBytes(source) {
+  return source instanceof Blob ? new Uint8Array(await source.arrayBuffer()) : new Uint8Array(source);
 }

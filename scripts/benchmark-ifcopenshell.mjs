@@ -17,7 +17,10 @@ const baseline = {
   sha256: "fbebb7a7144277be213d156ed9b77de30de1d92b0b2b0c815e4a07555bfb929c",
 };
 
-if (isMainThread) {
+if (isMainThread && process.argv[2] === "--memory") {
+  const { benchmarkMemory } = await import("./benchmark-memory.mjs");
+  await benchmarkMemory(repository, process.argv.slice(3));
+} else if (isMainThread) {
   const source = await readBenchmarkSource(repository, benchmarkPaths);
   const files = process.argv.slice(2).map(file => path.resolve(file));
   if (!files.length) files.push(path.resolve("examples/sample.ifc"));

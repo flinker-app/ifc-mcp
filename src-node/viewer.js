@@ -14,6 +14,8 @@ import {
   openWithDesktopViewer,
 } from "./desktop-viewer.js";
 import { addDownload, clearDownloads, getDownload } from "./downloads.js";
+import { addApprovedPythonFile, clearApprovedPythonFiles, listApprovedPythonFiles,
+  removeApprovedPythonFile } from "./approved-python-files.js";
 import { resolvePath } from "./paths.js";
 import { nowIso, tokenUrlSafe } from "./utils.js";
 import { toolResult, toolError, toolResultText, bcfToolResult } from "./tool-results.js";
@@ -22,6 +24,7 @@ let activeView = null;
 let viewerServer = null;
 let viewerPort = null;
 let viewerToken = null;
+let pythonFileToken = null;
 let viewerStartup = null;
 let viewerShutdown = null;
 let viewerLastSeen = 0;
@@ -29,9 +32,11 @@ let pendingViewerResult = null;
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const viewerHtmlPath = path.join(moduleDir, "static", "viewer.html");
+const pickerHtmlPath = path.join(moduleDir, "static", "python-files.html");
 const VIEWER_TITLE = "IFC MCP Viewer";
 const VIEWPOINT_TITLE = "IFC MCP Viewpoint";
 const MAX_VIEWER_RESULT_BYTES = 64 * 1024;
+const FILE_HANDOFF_EXPIRY_MS = 5 * 60_000;
 // The viewer SDK caps snapshot files at 256 KiB before base64 encoding.
 const MAX_VIEWER_IMAGE_BASE64_BYTES = 4 * Math.ceil((256 * 1024) / 3);
 
@@ -42,9 +47,8 @@ export async function openViewer({ signal } = {}) {
   view.updatedAt = nowIso();
 
   const desktopResult = await openWithDesktopViewer({ view, activeModel: activeModel(view) });
-  if (desktopResult) return toolResult(desktopResult);
-
   await ensureViewerServer();
+  if (desktopResult) return toolResult({ ...desktopResult, ...pythonFilePicker() });
 
   const response = viewerResponse(view, {
     addedModel: false,
@@ -54,6 +58,11 @@ export async function openViewer({ signal } = {}) {
     ...response,
     opened_viewer: true,
   });
+}
+
+export async function openPythonFilePicker() {
+  await ensureViewerServer();
+  return pythonFilePicker();
 }
 
 export async function loadIfcFile({
@@ -246,7 +255,9 @@ export function stopViewerServer() {
         viewerServer = null;
         viewerPort = null;
         viewerToken = null;
+        pythonFileToken = null;
         clearViewerState();
+        await clearApprovedPythonFiles();
       }
     })().finally(() => { viewerShutdown = null; });
   }
@@ -287,6 +298,7 @@ async function startHttpServer(port) {
   server.unref();
   viewerPort = actualPort;
   viewerToken = token;
+  pythonFileToken = tokenUrlSafe(32);
   viewerServer = server;
   return actualPort;
 }
@@ -312,6 +324,10 @@ async function handleViewerRequest(request, response) {
       return;
     }
     const parts = url.pathname.split("/").filter(Boolean);
+    if (url.pathname === "/python-files" || url.pathname === "/python-files/approved") {
+      await handlePythonFileRequest(request, response, url, origin);
+      return;
+    }
     const stateEndpoint = url.pathname === "/state";
     const modelEndpoint = parts.length === 2 && parts[0] === "models";
     const downloadEndpoint = parts.length === 2 && parts[0] === "downloads";
@@ -454,11 +470,57 @@ async function handleViewerRequest(request, response) {
 }
 
 function hasViewerToken(request) {
-  const supplied = request.headers["x-ifc-viewer-token"];
-  if (!viewerToken || typeof supplied !== "string") return false;
-  const expected = Buffer.from(viewerToken);
+  return hasToken(viewerToken, request.headers["x-ifc-viewer-token"]);
+}
+
+function hasToken(token, supplied) {
+  if (!token || typeof supplied !== "string") return false;
+  const expected = Buffer.from(token);
   const received = Buffer.from(supplied);
   return received.length === expected.length && timingSafeEqual(received, expected);
+}
+
+async function handlePythonFileRequest(request, response, url, origin) {
+  if (url.pathname === "/python-files") {
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      sendJson(response, { error: "Method not allowed." }, 405);
+      return;
+    }
+    response.setHeader("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'");
+    sendBytes(response, await fs.readFile(pickerHtmlPath), { contentType: "text/html; charset=utf-8" });
+    return;
+  }
+
+  const token = pythonFileToken;
+  if (!hasToken(token, request.headers["x-ifc-python-file-token"])) {
+    sendJson(response, { error: "Python file authorization is required." }, 403);
+    return;
+  }
+  if (request.method === "GET") {
+    sendJson(response, { files: listApprovedPythonFiles() });
+    return;
+  }
+  if (request.headers.origin !== origin) {
+    sendJson(response, { error: "File selection must come from the IFC MCP picker." }, 403);
+    return;
+  }
+  if (request.method === "DELETE") {
+    sendJson(response, { removed: await removeApprovedPythonFile(url.searchParams.get("id")) });
+    return;
+  }
+  if (request.method !== "POST") {
+    sendJson(response, { error: "Method not allowed." }, 405);
+    return;
+  }
+  try {
+    const name = decodeURIComponent(request.headers["x-ifc-file-name"] || "");
+    const expiresInMs = request.headers["x-ifc-file-handoff"] === "1" ? FILE_HANDOFF_EXPIRY_MS : undefined;
+    const file = await addApprovedPythonFile(name, request, Number(request.headers["content-length"]),
+      () => pythonFileToken === token && !viewerShutdown && !response.destroyed, expiresInMs);
+    sendJson(response, { file }, 201);
+  } catch (error) {
+    if (!response.destroyed) sendJson(response, { error: error.message }, 400);
+  }
 }
 
 function ensureActiveView() {
@@ -606,6 +668,7 @@ function viewerResponse(view, { addedModel, activeModel }) {
   const url = viewerUrl();
   return {
     url,
+    ...pythonFilePicker(),
     active_model_path: activeModel?.path || null,
     active_model_filename: activeModel?.filename || null,
     model_paths: view.models.map((model) => model.path),
@@ -620,6 +683,11 @@ function viewerResponse(view, { addedModel, activeModel }) {
     note:
       `Open ${url} to view the IFC model. The same local viewer is reused for added models and view-state changes.`,
   };
+}
+
+function pythonFilePicker() {
+  return { file_picker_url: `${viewerOrigin()}/python-files#${pythonFileToken}`,
+    python_files: listApprovedPythonFiles() };
 }
 
 function viewerOrigin() {
