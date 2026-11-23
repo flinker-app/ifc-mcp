@@ -95,11 +95,11 @@ function runSandbox({ launcher, args, options }, input, signal, onProgress) {
       }
     });
     child.on("error", error => { failure = error; });
-    child.on("close", code => {
+    child.on("close", (code, exitSignal) => {
       signal.removeEventListener("abort", cancel);
       if (signal.aborted) reject(signal.reason);
       else if (failure) reject(failure);
-      else if (code || !reply) reject(new Error(stderr.trim() || `Python sandbox exited (${code}).`));
+      else if (code || exitSignal || !reply) reject(new Error(stderr.trim() || `Python sandbox exited (${exitSignal ?? code}).`));
       else if (reply.error) reject(new Error(String(reply.error)));
       else {
         try { resolve(decodeOutput(reply.output)); } catch (error) { reject(error); }

@@ -13,6 +13,8 @@ export async function startPosixSandbox(dist, stage) {
 async function macSandbox(stage) {
   const executable = await fs.realpath(process.execPath);
   const quote = JSON.stringify;
+  const node = `(literal ${quote(executable)})`;
+  const systemLibraries = '(subpath "/usr/lib") (subpath "/System/Library") (subpath "/private/var/db/dyld")';
   const ancestors = [stage, executable].flatMap(value => {
     const directories = [];
     while (path.dirname(value) !== value) {
@@ -24,11 +26,11 @@ async function macSandbox(stage) {
   const profile = [
     "(version 1)",
     "(deny default)",
-    `(allow process-exec (literal ${quote(executable)}))`,
+    `(allow process-exec ${node})`,
+    `(allow file-map-executable ${node} ${systemLibraries})`,
     "(allow sysctl-read)",
     `(allow file-read-metadata ${Array.from(new Set(ancestors), value => `(literal ${quote(value)})`).join(" ")})`,
-    `(allow file-read* (literal ${quote(executable)}) (subpath ${quote(stage)})`,
-    '  (subpath "/usr/lib") (subpath "/System/Library") (subpath "/private/var/db/dyld")',
+    `(allow file-read* ${node} (subpath ${quote(stage)}) ${systemLibraries}`,
     '  (literal "/dev/null") (literal "/dev/random") (literal "/dev/urandom"))',
   ].join("\n");
   const launcher = "/usr/bin/sandbox-exec";
