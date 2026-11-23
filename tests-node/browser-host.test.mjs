@@ -242,7 +242,7 @@ test("browser runtime preserves BCF outcomes and errors without claiming unconfi
   await assertToolError(() => call(host, "set-bcf-view", { bcf_path: "view.bcf" }), /Broken archive/);
 });
 
-test("browser runtime prevents overlapping Python and recovers after worker and SDK failures", async () => {
+test("browser runtime prevents overlapping Python and recovers after worker and runtime failures", async () => {
   let execute;
   let loadError;
   const host = createIfcMcpHost({ files: new Map(), loadPython: async () => {
@@ -274,7 +274,7 @@ test("existing custom tool handlers can override the browser defaults", async ()
   assert.deepEqual(await call(host, "run-python", { files: [], code: "custom" }), toolResult({ custom: true }));
 });
 
-test("browser hosts reuse the SDK and discard cancelled results without overlapping it", async () => {
+test("browser hosts reuse the runtime and discard cancelled results without overlapping it", async () => {
   let finish;
   let started;
   let receivedSignal;

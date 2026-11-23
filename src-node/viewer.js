@@ -1,10 +1,11 @@
 import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
+import { timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { CallToolResultSchema } from "@modelcontextprotocol/core";
 
-import { BCF_SUFFIXES, DEFAULT_VIEWER_PORT, DEFAULT_VIEWER_URL, IFC_SUFFIXES } from "./constants.js";
+import { BCF_SUFFIXES, DEFAULT_VIEWER_PORT, IFC_SUFFIXES } from "./constants.js";
 import { createBcfBytes, readBcfTopics, readBcfTopicsFromBytes } from "./bcf.js";
 import {
   applyBcfStateWithDesktopViewer,
@@ -12,7 +13,9 @@ import {
   loadFileWithDesktopViewer,
   openWithDesktopViewer,
 } from "./desktop-viewer.js";
-import { addDownload, getDownload, resetDownloadsForTests } from "./downloads.js";
+import { addDownload, clearDownloads, getDownload } from "./downloads.js";
+import { addApprovedPythonFile, clearApprovedPythonFiles, listApprovedPythonFiles,
+  removeApprovedPythonFile } from "./approved-python-files.js";
 import { resolvePath } from "./paths.js";
 import { nowIso, tokenUrlSafe } from "./utils.js";
 import { toolResult, toolError, toolResultText, bcfToolResult } from "./tool-results.js";
@@ -20,13 +23,22 @@ import { toolResult, toolError, toolResultText, bcfToolResult } from "./tool-res
 let activeView = null;
 let viewerServer = null;
 let viewerPort = null;
+let viewerToken = null;
+let pythonFileToken = null;
+let viewerStartup = null;
+let viewerShutdown = null;
 let viewerLastSeen = 0;
 let pendingViewerResult = null;
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const viewerHtmlPath = path.join(moduleDir, "static", "viewer.html");
+const pickerHtmlPath = path.join(moduleDir, "static", "python-files.html");
 const VIEWER_TITLE = "IFC MCP Viewer";
 const VIEWPOINT_TITLE = "IFC MCP Viewpoint";
+const MAX_VIEWER_RESULT_BYTES = 64 * 1024;
+const FILE_HANDOFF_EXPIRY_MS = 5 * 60_000;
+// The viewer SDK caps snapshot files at 256 KiB before base64 encoding.
+const MAX_VIEWER_IMAGE_BASE64_BYTES = 4 * Math.ceil((256 * 1024) / 3);
 
 export async function openViewer({ signal } = {}) {
   signal?.throwIfAborted();
@@ -35,9 +47,8 @@ export async function openViewer({ signal } = {}) {
   view.updatedAt = nowIso();
 
   const desktopResult = await openWithDesktopViewer({ view, activeModel: activeModel(view) });
-  if (desktopResult) return toolResult(desktopResult);
-
   await ensureViewerServer();
+  if (desktopResult) return toolResult({ ...desktopResult, ...pythonFilePicker() });
 
   const response = viewerResponse(view, {
     addedModel: false,
@@ -47,6 +58,11 @@ export async function openViewer({ signal } = {}) {
     ...response,
     opened_viewer: true,
   });
+}
+
+export async function openPythonFilePicker() {
+  await ensureViewerServer();
+  return pythonFilePicker();
 }
 
 export async function loadIfcFile({
@@ -168,6 +184,7 @@ export async function setViewerBcfState({
 
 function waitForViewerResult(signal) {
   signal?.throwIfAborted();
+  if (viewerShutdown) return Promise.resolve(toolError("IFC viewer is shutting down."));
   if (!pendingViewerResult && Date.now() - viewerLastSeen > 5000) {
     return Promise.resolve(toolError("No browser viewer is connected; application is unconfirmed."));
   }
@@ -194,28 +211,57 @@ export async function createDownloadUrl({ name, bytes, type = "application/octet
   });
   return {
     ...download,
-    url: `${viewerUrl()}${download.download_path}`,
+    url: `${viewerOrigin()}${download.download_path}`,
   };
 }
 
 export async function ensureViewerServer() {
+  if (viewerShutdown) throw new Error("IFC viewer is shutting down.");
   if (viewerServer) {
     return viewerPort;
   }
 
-  const port = DEFAULT_VIEWER_PORT;
-  try {
-    viewerPort = await startHttpServer(port);
-    return port;
-  } catch (error) {
-    if (isNpmTest() && isAddressInUse(error)) {
-      viewerPort = await startHttpServer(0);
-      return viewerPort;
-    }
-    throw new Error(
-      `Could not start IFC viewer at ${DEFAULT_VIEWER_URL}. Close the process using that port and try again. ${error?.message || error}`,
-    );
+  if (!viewerStartup) {
+    viewerStartup = startHttpServer(DEFAULT_VIEWER_PORT)
+      .catch(error => {
+        if (!isAddressInUse(error)) throw error;
+        return startHttpServer(0);
+      })
+      .catch(error => {
+        throw new Error(`Could not start local IFC viewer. ${error?.message || error}`, { cause: error });
+      })
+      .finally(() => { viewerStartup = null; });
   }
+  return viewerStartup;
+}
+
+export function stopViewerServer() {
+  if (!viewerShutdown) {
+    viewerShutdown = (async () => {
+      await viewerStartup?.catch(() => {});
+      pendingViewerResult?.finish(toolError("IFC viewer stopped."));
+      const server = viewerServer;
+      try {
+        if (server) {
+          await new Promise((resolve, reject) => {
+            const deadline = setTimeout(() => server.closeAllConnections(), 5000);
+            server.close(error => {
+              clearTimeout(deadline);
+              if (error) reject(error); else resolve();
+            });
+          });
+        }
+      } finally {
+        viewerServer = null;
+        viewerPort = null;
+        viewerToken = null;
+        pythonFileToken = null;
+        clearViewerState();
+        await clearApprovedPythonFiles();
+      }
+    })().finally(() => { viewerShutdown = null; });
+  }
+  return viewerShutdown;
 }
 
 export async function viewerCli(args) {
@@ -240,6 +286,7 @@ export async function viewerCli(args) {
 }
 
 async function startHttpServer(port) {
+  const token = tokenUrlSafe(32);
   const server = http.createServer(handleViewerRequest);
   const actualPort = await new Promise((resolve, reject) => {
     server.once("error", reject);
@@ -249,17 +296,57 @@ async function startHttpServer(port) {
     });
   });
   server.unref();
+  viewerPort = actualPort;
+  viewerToken = token;
+  pythonFileToken = tokenUrlSafe(32);
   viewerServer = server;
   return actualPort;
 }
 
 async function handleViewerRequest(request, response) {
+  response.setHeader("Cache-Control", "no-store");
+  response.setHeader("Referrer-Policy", "no-referrer");
+  response.setHeader("X-Content-Type-Options", "nosniff");
   try {
-    const url = new URL(request.url, `http://${request.headers.host || "127.0.0.1"}`);
+    const host = request.headers.host;
+    if (!viewerPort || (host !== `127.0.0.1:${viewerPort}` && host !== `localhost:${viewerPort}`)) {
+      sendJson(response, { error: "Invalid viewer Host." }, 403);
+      return;
+    }
+    const origin = `http://${host}`;
+    if (request.headers.origin !== undefined && request.headers.origin !== origin) {
+      sendJson(response, { error: "Viewer requests must come from the same origin." }, 403);
+      return;
+    }
+    const url = new URL(request.url, origin);
+    if (url.origin !== origin) {
+      sendJson(response, { error: "Invalid viewer request origin." }, 403);
+      return;
+    }
     const parts = url.pathname.split("/").filter(Boolean);
+    if (url.pathname === "/python-files" || url.pathname === "/python-files/approved") {
+      await handlePythonFileRequest(request, response, url, origin);
+      return;
+    }
+    const stateEndpoint = url.pathname === "/state";
+    const modelEndpoint = parts.length === 2 && parts[0] === "models";
+    const downloadEndpoint = parts.length === 2 && parts[0] === "downloads";
+    const privateEndpoint = stateEndpoint || url.pathname === "/metadata" || url.pathname === "/bcf" || modelEndpoint;
+    if (privateEndpoint && !hasViewerToken(request)) {
+      sendJson(response, { error: "Viewer authorization is required." }, 403);
+      return;
+    }
+    const statePost = stateEndpoint && request.method === "POST";
+    const knownEndpoint = privateEndpoint || url.pathname === "/" || url.pathname === "/health"
+      || url.pathname === "/tool-results.js" || downloadEndpoint;
+    if (knownEndpoint && request.method !== "GET" && request.method !== "HEAD" && !statePost) {
+      response.setHeader("Allow", stateEndpoint ? "GET, HEAD, POST" : "GET, HEAD");
+      sendJson(response, { error: "Method not allowed." }, 405);
+      return;
+    }
 
     if (url.pathname === "/health") {
-      sendJson(response, { ok: true, model_count: activeView?.models.length || 0 });
+      sendJson(response, { ok: true });
       return;
     }
 
@@ -277,9 +364,9 @@ async function handleViewerRequest(request, response) {
       return;
     }
 
-    if (url.pathname === "/metadata" || url.pathname === "/state") {
-      if (url.pathname === "/state" && request.method === "POST") {
-        if (request.headers.origin !== viewerUrl()) {
+    if (url.pathname === "/metadata" || stateEndpoint) {
+      if (statePost) {
+        if (request.headers.origin === undefined) {
           sendJson(response, { error: "Results must come from this viewer." }, 403);
           return;
         }
@@ -287,12 +374,17 @@ async function handleViewerRequest(request, response) {
         let size = 0;
         for await (const chunk of request) {
           size += chunk.length;
-          if (size > 65536) { sendJson(response, { error: "Result is too large." }, 413); return; }
+          if (size > MAX_VIEWER_RESULT_BYTES + MAX_VIEWER_IMAGE_BASE64_BYTES) {
+            sendJson(response, { error: "Result is too large." }, 413);
+            return;
+          }
           chunks.push(chunk);
         }
         let message;
         try { message = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch {
-          sendJson(response, { error: "Invalid viewer result." }, 400); return;
+          if (size > MAX_VIEWER_RESULT_BYTES) sendJson(response, { error: "Result is too large." }, 413);
+          else sendJson(response, { error: "Invalid viewer result." }, 400);
+          return;
         }
         if (!message || typeof message !== "object" || Array.isArray(message)) {
           sendJson(response, { error: "Invalid viewer result." }, 400); return;
@@ -304,7 +396,16 @@ async function handleViewerRequest(request, response) {
           if (!Array.isArray(message.result.content) || !CallToolResultSchema.safeParse(message.result).success) {
             sendJson(response, { error: "Invalid MCP viewer result." }, 400); return;
           }
+          const imageBytes = message.result.content.reduce((total, part) =>
+            total + (part.type === "image" ? Buffer.byteLength(part.data) : 0), 0);
+          if (imageBytes > MAX_VIEWER_IMAGE_BASE64_BYTES || size - imageBytes > MAX_VIEWER_RESULT_BYTES) {
+            sendJson(response, { error: "Result is too large." }, 413);
+            return;
+          }
           pendingViewerResult.finish(message.result);
+        } else if (size > MAX_VIEWER_RESULT_BYTES) {
+          sendJson(response, { error: "Result is too large." }, 413);
+          return;
         }
         viewerLastSeen = Date.now();
       }
@@ -312,7 +413,7 @@ async function handleViewerRequest(request, response) {
       return;
     }
 
-    if (parts.length === 2 && parts[0] === "models") {
+    if (modelEndpoint) {
       const model = activeView?.models.find((item) => item.id === parts[1]);
       if (!model) {
         sendJson(response, { error: "Unknown model." }, 404);
@@ -325,7 +426,7 @@ async function handleViewerRequest(request, response) {
       return;
     }
 
-    if (parts.length === 2 && parts[0] === "downloads") {
+    if (downloadEndpoint) {
       const download = getDownload(parts[1]);
       if (!download) {
         sendJson(response, { error: "Unknown or expired download." }, 404);
@@ -365,6 +466,60 @@ async function handleViewerRequest(request, response) {
     sendJson(response, { error: "Not found." }, 404);
   } catch (error) {
     sendJson(response, { error: error?.message || String(error) }, 500);
+  }
+}
+
+function hasViewerToken(request) {
+  return hasToken(viewerToken, request.headers["x-ifc-viewer-token"]);
+}
+
+function hasToken(token, supplied) {
+  if (!token || typeof supplied !== "string") return false;
+  const expected = Buffer.from(token);
+  const received = Buffer.from(supplied);
+  return received.length === expected.length && timingSafeEqual(received, expected);
+}
+
+async function handlePythonFileRequest(request, response, url, origin) {
+  if (url.pathname === "/python-files") {
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      sendJson(response, { error: "Method not allowed." }, 405);
+      return;
+    }
+    response.setHeader("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'");
+    sendBytes(response, await fs.readFile(pickerHtmlPath), { contentType: "text/html; charset=utf-8" });
+    return;
+  }
+
+  const token = pythonFileToken;
+  if (!hasToken(token, request.headers["x-ifc-python-file-token"])) {
+    sendJson(response, { error: "Python file authorization is required." }, 403);
+    return;
+  }
+  if (request.method === "GET") {
+    sendJson(response, { files: listApprovedPythonFiles() });
+    return;
+  }
+  if (request.headers.origin !== origin) {
+    sendJson(response, { error: "File selection must come from the IFC MCP picker." }, 403);
+    return;
+  }
+  if (request.method === "DELETE") {
+    sendJson(response, { removed: await removeApprovedPythonFile(url.searchParams.get("id")) });
+    return;
+  }
+  if (request.method !== "POST") {
+    sendJson(response, { error: "Method not allowed." }, 405);
+    return;
+  }
+  try {
+    const name = decodeURIComponent(request.headers["x-ifc-file-name"] || "");
+    const expiresInMs = request.headers["x-ifc-file-handoff"] === "1" ? FILE_HANDOFF_EXPIRY_MS : undefined;
+    const file = await addApprovedPythonFile(name, request, Number(request.headers["content-length"]),
+      () => pythonFileToken === token && !viewerShutdown && !response.destroyed, expiresInMs);
+    sendJson(response, { file }, 201);
+  } catch (error) {
+    if (!response.destroyed) sendJson(response, { error: error.message }, 400);
   }
 }
 
@@ -513,6 +668,7 @@ function viewerResponse(view, { addedModel, activeModel }) {
   const url = viewerUrl();
   return {
     url,
+    ...pythonFilePicker(),
     active_model_path: activeModel?.path || null,
     active_model_filename: activeModel?.filename || null,
     model_paths: view.models.map((model) => model.path),
@@ -529,11 +685,20 @@ function viewerResponse(view, { addedModel, activeModel }) {
   };
 }
 
-function viewerUrl() {
+function pythonFilePicker() {
+  return { file_picker_url: `${viewerOrigin()}/python-files#${pythonFileToken}`,
+    python_files: listApprovedPythonFiles() };
+}
+
+function viewerOrigin() {
   if (!viewerPort) {
     throw new Error("Viewer server is not started.");
   }
   return `http://127.0.0.1:${viewerPort}`;
+}
+
+function viewerUrl() {
+  return `${viewerOrigin()}/#${viewerToken}`;
 }
 
 function viewMetadata(view) {
@@ -629,7 +794,6 @@ function sendBytes(response, data, {
     "Content-Type": contentType,
     "Content-Length": Buffer.byteLength(data),
     ...(filename ? { "Content-Disposition": contentDisposition(disposition, filename) } : {}),
-    ...(disposition === "attachment" ? { "X-Content-Type-Options": "nosniff" } : {}),
   });
   response.end(data);
 }
@@ -662,14 +826,14 @@ function parseViewerArgs(args) {
 }
 
 export function resetViewerForTests() {
+  clearViewerState();
+}
+
+function clearViewerState() {
   pendingViewerResult?.finish(toolError("Viewer reset."));
   viewerLastSeen = 0;
   activeView = null;
-  resetDownloadsForTests();
-}
-
-function isNpmTest() {
-  return process.env.npm_lifecycle_event === "test";
+  clearDownloads();
 }
 
 function isAddressInUse(error) {

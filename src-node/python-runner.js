@@ -1,26 +1,25 @@
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
 
 import {
-  DEFAULT_COPILOT_SDK_URL,
   DEFAULT_MAX_OUTPUT_CHARS,
   IFC_SUFFIXES,
 } from "./constants.js";
 import { resolvePath } from "./paths.js";
 import { tokenUrlSafe, trimText } from "./utils.js";
 import { createDownloadUrl } from "./viewer.js";
+import * as localPython from "./python-local.js";
 
-const sdkModuleCache = new Map();
-const runningSdks = new WeakSet();
+const runningRuntimes = new WeakSet();
 
 export async function executeIfcPython({
   code,
   files = [],
+  attachments = null,
   workingDirectory = null,
   maxOutputChars = DEFAULT_MAX_OUTPUT_CHARS,
-  sdkUrl = DEFAULT_COPILOT_SDK_URL,
+  runtime = localPython,
   signal,
 }) {
   signal?.throwIfAborted();
@@ -29,14 +28,14 @@ export async function executeIfcPython({
   }
 
   const cwd = resolveWorkingDirectory(workingDirectory);
-  const inputFiles = resolveInputFiles(files);
+  const inputFiles = attachments === null ? resolveInputFiles(files) : resolveAttachments(attachments);
 
   try {
-    const output = await runSdk({ code, inputFiles, sdkUrl, signal });
+    const output = await runRuntime({ code, inputFiles, runtime, signal });
     const streams = extractStreams(output);
     return {
       ok: output.runtimeStatus !== "error",
-      exit_code: 0,
+      exit_code: output.runtimeStatus === "error" ? 1 : 0,
       result: output.result,
       stdout: trimText(streams.stdout, maxOutputChars),
       stderr: trimText(streams.stderr, maxOutputChars),
@@ -44,11 +43,10 @@ export async function executeIfcPython({
       working_directory: cwd,
       saved_files: output.savedFiles || [],
       runtime_status: output.runtimeStatus || null,
-      runner: "node_copilot_cdn",
-      sdk_url: sdkUrl,
-      sdk_output: output,
+      runner: "node_pyodide",
+      runtime_output: output,
       note:
-        "Generated Python executed directly in Node through the Flinker Copilot SDK Pyodide runtime.",
+        "Generated Python executed by the repository's local Pyodide worker runtime.",
     };
   } catch (error) {
     const output = serializeError(error);
@@ -63,36 +61,28 @@ export async function executeIfcPython({
       working_directory: cwd,
       saved_files: [],
       runtime_status: "error",
-      runner: "node_copilot_cdn",
-      sdk_url: sdkUrl,
-      sdk_output: output,
+      runner: "node_pyodide",
+      runtime_output: output,
     };
   }
 }
 
-async function runSdk({ code, inputFiles, sdkUrl, signal }) {
-  const files = await buildSdkInputFiles(inputFiles);
-  const sdk = await loadSdkModule(sdkUrl);
+async function runRuntime({ code, inputFiles, runtime, signal }) {
+  const files = await buildRuntimeInputFiles(inputFiles, runtime === localPython);
   signal?.throwIfAborted();
-  if (runningSdks.has(sdk)) throw new Error("The previous Python call is still running. Wait for it to finish.");
-  runningSdks.add(sdk);
+  if (runningRuntimes.has(runtime)) throw new Error("The previous Python call is still running. Wait for it to finish.");
+  runningRuntimes.add(runtime);
   let output;
   try {
     const requestId = tokenUrlSafe(12);
-    if (typeof sdk.runPythonInWorker === "function") {
-      output = await sdk.runPythonInWorker(code, files, { requestId, signal });
+    if (typeof runtime.runPythonInWorker === "function") {
+      output = await runtime.runPythonInWorker(code, files, { requestId, signal });
       signal?.throwIfAborted();
       return await formatWorkerOutput(output, files);
     }
-    if (typeof sdk.copilot?.runPython === "function") {
-      const run = await sdk.copilot.runPython({ python: code, files, requestId, signal, preserveExistingFiles: false });
-      output = run.output;
-      signal?.throwIfAborted();
-      return await formatCopilotOutput(run, files);
-    }
-    throw new Error("Flinker Copilot SDK does not expose runPythonInWorker or copilot.runPython.");
+    throw new Error("Python runtime does not expose runPythonInWorker.");
   } finally {
-    runningSdks.delete(sdk);
+    runningRuntimes.delete(runtime);
     for (const file of [...(output?.files ?? []), ...(output?.displayFiles ?? [])]) {
       if (file.url?.startsWith("blob:")) URL.revokeObjectURL(file.url);
     }
@@ -117,7 +107,7 @@ async function formatWorkerOutput(worker, files) {
   const uploadedFiles = uploadedFileMetas(files);
   output.file = uploadedFiles[0] || null;
   output.filesUsed = uploadedFiles;
-  output.savedFiles = await exposeSdkFiles(Array.isArray(worker?.files) ? worker.files : []);
+  output.savedFiles = await exposeRuntimeFiles(Array.isArray(worker?.files) ? worker.files : []);
   output.files = output.savedFiles;
 
   const outputs = buildOutputs({
@@ -129,35 +119,6 @@ async function formatWorkerOutput(worker, files) {
     output.outputs = outputs;
   }
   return output;
-}
-
-async function formatCopilotOutput(run, files) {
-  const output = run && typeof run.output === "object" ? { ...run.output } : {};
-  const uploadedFiles = uploadedFileMetas(files);
-  output.file = uploadedFiles[0] || null;
-  output.filesUsed = uploadedFiles;
-  output.savedFiles = await exposeSdkFiles(Array.isArray(output.files) ? output.files : []);
-  output.files = output.savedFiles;
-  return output;
-}
-
-function loadSdkModule(sdkUrl) {
-  if (!sdkModuleCache.has(sdkUrl)) {
-    sdkModuleCache.set(sdkUrl, importSdkModule(sdkUrl).catch(error => {
-      sdkModuleCache.delete(sdkUrl);
-      throw error;
-    }));
-  }
-  return sdkModuleCache.get(sdkUrl);
-}
-
-async function importSdkModule(sdkUrl) {
-  if (/^https?:/.test(sdkUrl)) {
-    const response = await fetch(sdkUrl);
-    if (!response.ok) throw new Error(`Could not load Flinker Copilot SDK: ${response.status} ${response.statusText}`);
-    return import(`data:text/javascript;base64,${Buffer.from(await response.text()).toString("base64")}`);
-  }
-  return import(path.isAbsolute(sdkUrl) ? pathToFileURL(sdkUrl).href : sdkUrl);
 }
 
 function resolveWorkingDirectory(workingDirectory) {
@@ -183,7 +144,7 @@ function resolveInputFiles(files) {
     return [];
   }
   if (!Array.isArray(files)) {
-    throw new Error("files must be an array of local IFC/IFCXML/IFCZIP paths");
+    throw new Error("files must be an array of local IFC/IFCZIP paths");
   }
 
   const usedNames = new Set();
@@ -202,10 +163,16 @@ function resolveInputFiles(files) {
   });
 }
 
-async function buildSdkInputFiles(inputFiles) {
+async function buildRuntimeInputFiles(inputFiles, onDisk) {
   const files = [];
   for (const inputFile of inputFiles) {
-    const fileBytes = await fs.readFile(inputFile.path);
+    const localPath = inputFile.localPath ?? inputFile.path;
+    if (onDisk) {
+      files.push({ name: inputFile.name, localPath, size: inputFile.size ?? (await fs.stat(localPath)).size,
+        sourcePath: inputFile.path, type: "application/octet-stream" });
+      continue;
+    }
+    const fileBytes = await fs.readFile(localPath);
     files.push({
       name: inputFile.name,
       buffer: fileBytes.buffer.slice(
@@ -218,6 +185,16 @@ async function buildSdkInputFiles(inputFiles) {
     });
   }
   return files;
+}
+
+function resolveAttachments(attachments) {
+  const usedNames = new Set();
+  return attachments.map(({ name, localPath, size_bytes, tool_path }, index) => ({
+    name: uniqueInputFileName(name, usedNames, index + 1),
+    path: tool_path,
+    localPath,
+    size: size_bytes,
+  }));
 }
 
 function uniqueInputFileName(baseName, usedNames, fallbackIndex) {
@@ -310,7 +287,7 @@ function toPlainText(value) {
   }
 }
 
-async function exposeSdkFiles(files) {
+async function exposeRuntimeFiles(files) {
   const savedFiles = [];
   if (!Array.isArray(files) || files.length === 0) {
     return savedFiles;
@@ -330,7 +307,7 @@ async function exposeSdkFiles(files) {
     used.add(name.toLowerCase());
 
     try {
-      const bytes = await readSdkFileBytes(file);
+      const bytes = await readRuntimeFileBytes(file);
       if (!bytes) {
         continue;
       }
@@ -359,7 +336,7 @@ async function exposeSdkFiles(files) {
   return savedFiles;
 }
 
-async function readSdkFileBytes(file) {
+async function readRuntimeFileBytes(file) {
   if (file?.blob instanceof Blob) {
     return Buffer.from(await file.blob.arrayBuffer());
   }

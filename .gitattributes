@@ -9,3 +9,4 @@
 *.jpeg binary
 *.gif binary
 *.wasm binary
+*.so binary

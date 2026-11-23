@@ -7,7 +7,7 @@
   <style>
     html,
     body,
-    bim-grid {
+    #ifc-viewer {
       width: 100%;
       height: 100%;
       margin: 0;
@@ -22,11 +22,14 @@
   <bim-grid id="ifc-viewer"></bim-grid>
 
   <script type="module">
-    import { IfcViewer } from "https://cdn.flinker.app/ifc-viewer/v3.4.6/ifc-viewer.es.js";
+    import { Viewer, bcf } from "https://cdn.flinker.app/ifc-viewer/v4.0.31/ifc-viewer.es.js";
     import { toolResult, toolError, bcfToolResult } from "/tool-results.js";
 
+    const token = location.hash.slice(1);
+    const authHeaders = { "X-IFC-Viewer-Token": token };
+
     async function bytesFrom(url) {
-      const response = await fetch(url);
+      const response = await fetch(url, { headers: authHeaders });
       if (!response.ok) {
         throw new Error(`${response.status} ${response.statusText}`);
       }
@@ -35,7 +38,7 @@
 
     async function syncState(result = {}) {
       const response = await fetch("/state", { method: "POST",
-        headers: { "Content-Type": "application/json" }, body: JSON.stringify(result) });
+        headers: { ...authHeaders, "Content-Type": "application/json" }, body: JSON.stringify(result) });
       if (!response.ok) {
         throw new Error(`${response.status} ${response.statusText}`);
       }
@@ -43,12 +46,38 @@
     }
 
     try {
-      const viewer = new IfcViewer("#ifc-viewer");
+      if (!/^[A-Za-z0-9_-]{43}$/.test(token)) {
+        throw new Error("Open the complete viewer link returned by IFC MCP.");
+      }
+      const viewer = new Viewer("#ifc-viewer");
       window.ifcMcpViewer = viewer;
       await viewer.ready;
 
       const loadedModels = new Set();
       let loadedBcfVersion = 0;
+
+      async function captureViewpointImage() {
+        // The SDK captures the rendered frame into a fresh, unsaved topic.
+        const archive = await viewer.createTopic(undefined, { signal: AbortSignal.timeout(30_000) });
+        const markupPath = Object.keys(archive.entries).find(name => name.endsWith("/markup.bcf"));
+        if (!markupPath) throw new Error("The viewer did not produce a snapshot topic.");
+        const xml = bcf.v3_0.markup;
+        const topic = xml.createMarkup.read(archive.entries[markupPath].document?.root)?.children.Topic;
+        const viewpoints = xml.createTopic.read(topic)?.children.Viewpoints;
+        const viewpoint = xml.createViewPoint.read(xml.createViewPoint.all(viewpoints)[0]);
+        const name = xml.createSnapshot.read(viewpoint?.children.Snapshot);
+        const folder = markupPath.slice(0, markupPath.lastIndexOf("/") + 1);
+        const bytes = archive.entries[folder + name]?.bytes;
+        if (!bytes?.length) throw new Error("The viewer did not produce a snapshot.");
+        const mimeType = /\.jpe?g$/i.test(name) ? "image/jpeg" : "image/png";
+        const dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = () => reject(reader.error);
+          reader.readAsDataURL(new Blob([bytes], { type: mimeType }));
+        });
+        return { type: "image", mimeType, data: dataUrl.split(",", 2)[1] };
+      }
 
       async function loadModels(state) {
         const models = Array.isArray(state.models) ? state.models : [];
@@ -85,13 +114,23 @@
             await bytesFrom(`/bcf?version=${state.bcf_version}`)
           );
 
-          // Released viewer builds return import diagnostics before topic selection.
-          if (!Array.isArray(result?.content) && state.bcf_topic_guid && typeof viewer.select === "function"
+          // Preserve import diagnostics when selecting the imported topic.
+          if (!Array.isArray(result?.content) && state.bcf_topic_guid && typeof viewer.selectTopic === "function"
             && !["applied", "partial"].includes(result?.application)) {
-            const selected = await viewer.select(state.bcf_topic_guid);
+            const selected = await viewer.selectTopic(state.bcf_topic_guid);
             if (selected) result = { ...result, ...selected, issues: [...(result?.issues || []), ...(selected.issues || [])] };
           }
-          return bcfToolResult(result);
+          const reply = bcfToolResult(result);
+          const report = result?.structuredContent ?? result;
+          if (!["applied", "partial"].includes(report?.application)
+            || report.issues?.some(issue => issue.code === "viewpoint-superseded")
+            || reply.content.some(part => part.type === "image")) return reply;
+          try {
+            return { ...reply, content: [...reply.content, await captureViewpointImage()] };
+          } catch (error) {
+            return { ...reply, content: [...reply.content,
+              { type: "text", text: `Viewer screenshot unavailable: ${error.message}` }] };
+          }
         } finally {
           loadedBcfVersion = state.bcf_version;
         }
@@ -132,6 +171,7 @@
         }
       }, 1000);
     } catch (error) {
+      document.querySelector("#ifc-viewer").textContent = error.message;
       console.error(error);
     }
   </script>

@@ -1,0 +1,79 @@
+# Build the OpenCascade triangle BVH side module with Emscripten 4.0.9.
+# Start from IfcOpenShell revision a963c382789a188734c5a334a2ee59f77586081f.
+# Extract include/ from these conda-forge linux-64 packages into one prefix:
+#   libboost-headers-1.86.0-ha770c72_5
+#   eigen-3.4.0-h54a6638_2
+#   occt-7.8.1-novtk_he2768ca_103
+# Set HEADERS to that include/ directory and NATIVE_DIR to this patch's directory.
+# Run from the root of the IfcOpenShell checkout:
+#
+# git apply "$NATIVE_DIR/single-thread-clash.patch"
+# em++ -std=c++17 -Oz -DNDEBUG -DIFOPSH_WITH_OPENCASCADE -DIFOPSH_SAFE_INSTANCE \
+#   -DIFC_GEOMLIBRARY_EXPORTS -DIFCOPENSHELL_WASM_PLUGIN_ID=opencascade_trianglebvh \
+#   -fPIC -fwasm-exceptions -sSIDE_MODULE=2 \
+#   -sEXPORTED_FUNCTIONS=_ifcopenshell_plugin_abi_v2,_ifcopenshell_plugin_metadata_v1,_ifcopenshell_register_tree_plugin_v1,_ifcopenshell_emscripten_register_tree_opencascade_trianglebvh \
+#   -Isrc -I"$HEADERS" -I"$HEADERS/opencascade" -I"$HEADERS/eigen3" \
+#   src/ifcgeom/kernels/opencascade/tree_trianglebvh_plugin.cpp \
+#   src/ifcgeom/tree_registry.cpp src/ifcgeom/tree_plugin.cpp \
+#   -o "$NATIVE_DIR/ifcopenshell_geometry_tree_opencascade_trianglebvh.so"
+#
+# Plugin SHA-256: 8807457ac7435c7ef253da5acf8e9ecfeedd2a6dad3acf40b339122e0a72782d
+
+--- a/src/ifcgeom/kernels/opencascade/bvh_tree.h
++++ b/src/ifcgeom/kernels/opencascade/bvh_tree.h
+@@ -161,7 +161,7 @@
+ 				std::mutex results_mutex;
+ 
+ 				for (auto& tasks : threaded_tasks) {
+-					threads.emplace_back([this, &tasks, &results, &results_mutex, tolerance, check_all] {
++					schedule_clash_job(threads, [this, &tasks, &results, &results_mutex, tolerance, check_all] {
+ 						std::vector<clash> thread_results;
+ 						for (auto& task : tasks) {
+ 							const auto& obb_a = obbs_.find(task.a)->second;
+@@ -291,7 +291,7 @@
+ 				std::mutex results_mutex;
+ 
+ 				for (auto& tasks : threaded_tasks) {
+-					threads.emplace_back([this, &tasks, &results, &results_mutex, allow_touching] {
++					schedule_clash_job(threads, [this, &tasks, &results, &results_mutex, allow_touching] {
+ 						std::vector<clash> thread_results;
+ 						for (auto& task : tasks) {
+ 							const auto& obb_a = obbs_.find(task.a)->second;
+@@ -376,7 +376,7 @@
+ 				std::mutex results_mutex;
+ 
+ 				for (auto& tasks : threaded_tasks) {
+-					threads.emplace_back([this, &tasks, &results, &results_mutex, clearance, check_all] {
++					schedule_clash_job(threads, [this, &tasks, &results, &results_mutex, clearance, check_all] {
+ 						std::vector<clash> thread_results;
+ 						for (auto& task : tasks) {
+ 							const auto& obb_a = obbs_.find(task.a)->second;
+@@ -1122,8 +1122,20 @@
+ 				return box_set;
+ 			}
+ 
++			template <typename Job>
++			static void schedule_clash_job(std::vector<std::thread>& threads, Job&& job) {
++#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
++				job();
++#else
++				threads.emplace_back(std::forward<Job>(job));
++#endif
++			}
++
+ 			std::vector<std::vector<clash_task>> allocate_tasks_to_threads(
+ 					std::vector<clash_task>& task_queue) const {
++#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
++				return {std::move(task_queue)};
++#else
+ 				int num_threads = std::thread::hardware_concurrency();
+ 				std::vector<std::vector<clash_task>> threaded_tasks(num_threads);
+ 
+@@ -1134,6 +1146,7 @@
+ 					threaded_tasks[i] = std::vector<clash_task>(startIter, endIter);
+ 				}
+ 				return threaded_tasks;
++#endif
+ 			}
+ 
+ 			void add_triangulation_element(ifcopenshell::geom::triangulation_element* elem) {

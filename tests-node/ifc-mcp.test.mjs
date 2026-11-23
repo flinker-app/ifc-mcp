@@ -4,8 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
+import { httpFetch, viewerFetch } from "./fixtures/viewer-http.mjs";
 import vm from "node:vm";
-import { createServer } from "node:http";
 
 import { createBcfBytes, createBcfFile, readBcfTopics } from "../src-node/bcf.js";
 import { configureDesktopViewer } from "../src-node/desktop-viewer.js";
@@ -21,26 +21,6 @@ import {
 } from "../src-node/viewer.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-
-test("a failed SDK download does not poison later Python calls", async t => {
-  let downloads = 0;
-  const server = createServer((_request, response) => {
-    response.writeHead(++downloads === 1 ? 503 : 200);
-    response.end('let calls = 0; export async function runPythonInWorker() { return { stdout: String(++calls), files: [] }; }');
-  });
-  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => new Promise(resolve => server.close(resolve)));
-  const args = { code: "print(1)", files: [], sdkUrl: `http://127.0.0.1:${server.address().port}/sdk.js` };
-  const failed = await executeIfcPython(args);
-  assert.equal(failed.ok, false);
-  assert.match(failed.stderr, /503/);
-  assert.equal(downloads, 1, "The failed call must not be silently retried");
-  const recovered = await executeIfcPython(args);
-  assert.equal(recovered.ok, true, recovered.stderr);
-  assert.equal(recovered.stdout, "1");
-  assert.equal((await executeIfcPython(args)).stdout, "2");
-  assert.equal(downloads, 2, "Successful SDK initialization should stay cached");
-});
 
 test("run Python executes generated code once", async () => {
   const fixture = await sampleIfcFixture();
@@ -61,11 +41,11 @@ result = {
 `,
     files: [fixture.path],
     workingDirectory: fixture.root,
-    sdkUrl: await fakeCopilotSdkUrl(fixture.root),
+    runtime: await import(await fakePythonRuntimeUrl(fixture.root)),
   });
 
   assert.equal(executed.ok, true);
-  assert.equal(executed.runner, "node_copilot_cdn");
+  assert.equal(executed.runner, "node_pyodide");
   assert.equal(executed.result.schema, "IFC4");
   assert.equal(executed.result.walls[0].GlobalId, fixture.wallGuid);
   assert.equal(executed.result.walls[0].psets.Pset_WallCommon.FireRating, "EI60");
@@ -80,21 +60,21 @@ test("run Python reports errors", async () => {
     code: 'raise RuntimeError("boom")',
     files: [fixture.path],
     workingDirectory: fixture.root,
-    sdkUrl: await fakeCopilotSdkUrl(fixture.root),
+    runtime: await import(await fakePythonRuntimeUrl(fixture.root)),
   });
 
   assert.equal(executed.ok, false);
   assert.match(executed.stderr, /RuntimeError: boom/);
 });
 
-test("run Python saves SDK output files", async () => {
+test("run Python saves runtime output files", async () => {
   resetViewerForTests();
   const fixture = await sampleIfcFixture();
   const executed = await executeIfcPython({
     code: 'result = {"make_saved_file": True}  # make_saved_file',
     files: [fixture.path],
     workingDirectory: fixture.root,
-    sdkUrl: await fakeCopilotSdkUrl(fixture.root),
+    runtime: await import(await fakePythonRuntimeUrl(fixture.root)),
   });
 
   assert.equal(executed.ok, true);
@@ -114,7 +94,7 @@ test("run Python works without an IFC file", async () => {
   const executed = await executeIfcPython({
     code: 'print("ok")',
     workingDirectory: root,
-    sdkUrl: await fakeCopilotSdkUrl(root),
+    runtime: await import(await fakePythonRuntimeUrl(root)),
   });
 
   assert.equal(executed.ok, true);
@@ -154,9 +134,8 @@ test("viewer uses one stable URL and serves multiple IFC models", async () => {
 
   const opened = (await loadIfcFile({ filePath: fixture.path })).structuredContent;
   const url = new URL(opened.url);
-  const base = `${url.protocol}//${url.host}`;
 
-  assert.equal(opened.url, `${url.protocol}//${url.host}`);
+  assert.match(url.hash, /^#[A-Za-z0-9_-]{43}$/);
   assert.equal(url.hostname, "127.0.0.1");
   assert.ok(Number(url.port) > 0);
   assert.equal(url.pathname, "/");
@@ -168,12 +147,12 @@ test("viewer uses one stable URL and serves multiple IFC models", async () => {
   assert.equal(opened.loaded_ifc_file, false, "No connected viewer confirmed loading");
   assert.equal(opened.model_count, 1);
 
-  const metadata = await jsonFrom(`${base}/metadata`);
+  const metadata = await jsonFrom(opened.url, "/metadata");
   assert.equal(metadata.model_count, 1);
   assert.equal(metadata.models[0].filename, "sample.ifc");
   assert.equal(metadata.has_bcf, false);
 
-  const modelBytes = Buffer.from(await (await fetch(`${base}/models/${metadata.models[0].id}`)).arrayBuffer());
+  const modelBytes = Buffer.from(await (await viewerFetch(opened.url, `/models/${metadata.models[0].id}`)).arrayBuffer());
   assert.equal(modelBytes.subarray(0, 10).toString("utf8"), "ISO-10303-");
 
   const openedSecond = (await loadIfcFile({ filePath: secondModel })).structuredContent;
@@ -197,12 +176,12 @@ test("viewer uses one stable URL and serves multiple IFC models", async () => {
   assert.equal(reopened.model_count, 2);
   assert.equal(reopened.added_model, false);
 
-  const state = await jsonFrom(`${base}/state`);
+  const state = await jsonFrom(opened.url, "/state");
   assert.equal(state.has_bcf, true);
   assert.equal(state.bcf_version, 1);
   assert.ok(state.bcf_topic_guid);
 
-  const bcfBytes = Buffer.from(await (await fetch(`${base}/bcf`)).arrayBuffer());
+  const bcfBytes = Buffer.from(await (await viewerFetch(opened.url, "/bcf")).arrayBuffer());
   assert.equal(bcfBytes.subarray(0, 2).toString("utf8"), "PK");
 
   const cleared = (await clearViewer()).structuredContent;
@@ -213,7 +192,7 @@ test("viewer uses one stable URL and serves multiple IFC models", async () => {
   assert.equal(cleared.has_bcf, false);
   assert.equal(cleared.bcf_topic_guid, null);
 
-  const clearedState = await jsonFrom(`${base}/state`);
+  const clearedState = await jsonFrom(opened.url, "/state");
   assert.equal(clearedState.model_count, 0);
   assert.deepEqual(clearedState.models, []);
   assert.equal(clearedState.has_bcf, false);
@@ -236,7 +215,7 @@ test("browser viewer waits for long loads and returns load, BCF and clear result
   try {
     await vm.runInNewContext(`(async () => { ${script} })()`, {
       toolResult, toolError, bcfToolResult,
-      IfcViewer: class {
+      Viewer: class {
         ready = Promise.resolve();
         async add(name) {
           if (!name.endsWith(".bcfzip")) return;
@@ -245,24 +224,26 @@ test("browser viewer waits for long loads and returns load, BCF and clear result
           return report;
         }
         async clear() { clears++; }
-        async select() { return selection; }
+        async selectTopic() { return selection; }
       },
       fetch: (url, options = {}) => {
         if (loseReply && options.body && JSON.parse(options.body).id) {
           loseReply = false;
           throw new Error("Temporary connection loss");
         }
-        return fetch(new URL(url, opened.url), {
-          ...options, headers: { ...options.headers, Origin: opened.url },
+        return httpFetch(new URL(url, opened.url), {
+          ...options, headers: { ...options.headers, Origin: new URL(opened.url).origin },
         });
       },
+      location: new URL(opened.url),
       window: { setInterval(callback) { poll = callback; } },
-      document: {}, console: { warn() {}, error(error) { throw error; } }, Uint8Array,
+      document: { querySelector: () => ({}) },
+      console: { warn() {}, error(error) { throw error; } }, Uint8Array,
     });
     assert.equal(typeof poll, "function");
     async function requestState() {
       for (let attempt = 0; attempt < 100; attempt++) {
-        const state = await (await fetch(`${opened.url}/state`)).json();
+        const state = await (await viewerFetch(opened.url, "/state")).json();
         if (state.request_id) return state;
         await new Promise((resolve) => realSetTimeout(resolve, 10));
       }
@@ -336,8 +317,8 @@ test("browser viewer waits for long loads and returns load, BCF and clear result
 test("viewer validates acknowledgements and releases cancelled requests", async () => {
   resetViewerForTests();
   const opened = (await openViewer()).structuredContent;
-  const exchange = message => fetch(`${opened.url}/state`, {
-    method: "POST", headers: { Origin: opened.url, "Content-Type": "application/json" },
+  const exchange = message => viewerFetch(opened.url, "/state", {
+    method: "POST", headers: { Origin: new URL(opened.url).origin, "Content-Type": "application/json" },
     body: JSON.stringify(message),
   });
   await exchange({});
@@ -345,21 +326,21 @@ test("viewer validates acknowledgements and releases cancelled requests", async 
   const pending = clearViewer({ signal: controller.signal });
   let state;
   for (let i = 0; i < 100; i++) {
-    state = await jsonFrom(`${opened.url}/state`);
+    state = await jsonFrom(opened.url, "/state");
     if (state.request_id) break;
     await new Promise(resolve => setTimeout(resolve, 10));
   }
   assert.ok(state.request_id);
   for (const result of [{ content: "invalid" }, { content: [{ type: "image" }] }, { success: true }]) {
     assert.equal((await exchange({ id: state.request_id, result })).status, 400);
-    assert.equal((await jsonFrom(`${opened.url}/state`)).request_id, state.request_id);
+    assert.equal((await jsonFrom(opened.url, "/state")).request_id, state.request_id);
   }
   controller.abort(new Error("Stop viewer wait"));
   assert.match(toolResultText(await pending), /Stop viewer wait/);
-  assert.equal((await jsonFrom(`${opened.url}/state`)).request_id, null);
+  assert.equal((await jsonFrom(opened.url, "/state")).request_id, null);
   assert.equal((await exchange({ id: state.request_id, result: toolResult("late") })).status, 409);
   // The development viewer must serve helpers that can load without a bundler.
-  const source = await (await fetch(`${opened.url}/tool-results.js`)).text();
+  const source = await (await httpFetch(new URL("/tool-results.js", opened.url))).text();
   const helper = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
   assert.deepEqual(helper.toolResult("ready"), toolResult("ready"));
 });
@@ -375,7 +356,6 @@ test("viewer can load a generated IFC download URL", async () => {
   });
 
   const opened = (await loadIfcFile({ filePath: download.url })).structuredContent;
-  const base = opened.url;
 
   assert.equal(opened.loaded_ifc_file, false, "No connected viewer confirmed loading");
   assert.equal(opened.active_model_path, download.url);
@@ -383,7 +363,7 @@ test("viewer can load a generated IFC download URL", async () => {
   assert.equal(opened.model_count, 1);
   assert.equal(opened.models[0].filename, "generated-model.ifc");
 
-  const servedBytes = Buffer.from(await (await fetch(`${base}/models/${opened.models[0].id}`)).arrayBuffer());
+  const servedBytes = Buffer.from(await (await viewerFetch(opened.url, `/models/${opened.models[0].id}`)).arrayBuffer());
   assert.equal(servedBytes.subarray(0, 10).toString("utf8"), "ISO-10303-");
 
   const openedAgain = (await loadIfcFile({ filePath: `${download.url}?ignored=true` })).structuredContent;
@@ -412,12 +392,12 @@ test("viewer can apply a generated BCF download URL", async () => {
   assert.equal(updated.isError, true);
   assert.match(toolResultText(updated), /No browser viewer is connected/);
 
-  const state = await jsonFrom(`${opened.url}/state`);
+  const state = await jsonFrom(opened.url, "/state");
   assert.equal(state.bcf_filename, "generated-view.bcfzip");
   assert.equal(state.bcf_metadata.source_path, new URL(download.url).origin + new URL(download.url).pathname);
   assert.equal(state.bcf_topic_guid, created.metadata.topic_guid);
 
-  const bcfBytes = Buffer.from(await (await fetch(`${opened.url}/bcf`)).arrayBuffer());
+  const bcfBytes = Buffer.from(await (await viewerFetch(opened.url, "/bcf")).arrayBuffer());
   assert.equal(bcfBytes.subarray(0, 2).toString("utf8"), "PK");
 });
 
@@ -495,7 +475,7 @@ async function sampleIfcFixture() {
   };
 }
 
-async function fakeCopilotSdkUrl(root) {
+async function fakePythonRuntimeUrl(root) {
   const sdk = path.join(root, "fake-copilot-sdk.mjs");
   await fs.writeFile(
     sdk,
@@ -542,8 +522,8 @@ export async function runPythonInWorker(python) {
   return pathToFileURL(sdk).href;
 }
 
-async function jsonFrom(url) {
-  const response = await fetch(url);
+async function jsonFrom(url, pathname) {
+  const response = await viewerFetch(url, pathname);
   assert.equal(response.ok, true);
   return response.json();
 }

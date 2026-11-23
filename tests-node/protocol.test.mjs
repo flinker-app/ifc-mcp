@@ -132,7 +132,7 @@ test("caller cancellation stops waiting and prevents work after a pending onCall
   assert.equal(calls, 0);
 });
 
-test("Node reuses the SDK and forwards cancellation without overlapping execution", async t => {
+test("Node reuses the runtime and forwards cancellation without overlapping execution", async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "ifc-cancel-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const sdkPath = path.join(root, "sdk.mjs");
@@ -151,11 +151,11 @@ test("Node reuses the SDK and forwards cancellation without overlapping executio
   const sdkUrl = pathToFileURL(sdkPath).href;
   const sdk = await import(sdkUrl);
   const controller = new AbortController();
-  const pending = executeIfcPython({ code: "busy", sdkUrl, signal: controller.signal });
+  const pending = executeIfcPython({ code: "busy", runtime: sdk, signal: controller.signal });
   await sdk.ready;
   assert.equal(sdk.signal, controller.signal);
   controller.abort(new Error("Stop busy Python"));
-  const overlapping = await executeIfcPython({ code: "next", sdkUrl });
+  const overlapping = await executeIfcPython({ code: "next", runtime: sdk });
   assert.equal(overlapping.ok, false);
   assert.match(overlapping.stderr, /still running/);
   assert.equal(sdk.calls, 1);
@@ -163,7 +163,7 @@ test("Node reuses the SDK and forwards cancellation without overlapping executio
   const cancelled = await pending;
   assert.equal(cancelled.ok, false);
   assert.match(cancelled.stderr, /Stop busy Python/);
-  assert.equal((await executeIfcPython({ code: "next", sdkUrl })).stdout, "recovered");
+  assert.equal((await executeIfcPython({ code: "next", runtime: sdk })).stdout, "recovered");
   assert.equal(sdk.calls, 2);
 });
 

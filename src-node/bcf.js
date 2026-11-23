@@ -13,6 +13,7 @@ const xmlBuilder = new XMLBuilder({
   attributeNamePrefix: "@_",
   format: true,
   suppressEmptyNode: false,
+  suppressBooleanAttributes: false,
 });
 
 const xmlParser = new XMLParser({
@@ -149,7 +150,8 @@ export async function readBcfTopicsFromBytes(bytes, { bcfPath = null, maxTopics 
       viewpoints: [],
     };
 
-    const viewpointRefs = asArray(topicNode.Viewpoints?.ViewPoint || markup?.Markup?.Viewpoints?.ViewPoint);
+    const viewpointRefs = asArray(topicNode.Viewpoints?.ViewPoint
+      ?? markup?.Markup?.Viewpoints?.ViewPoint ?? markup?.Markup?.Viewpoints);
     for (const viewpointRef of viewpointRefs) {
       const viewpointFile = textValue(viewpointRef?.Viewpoint);
       if (!viewpointFile) {
@@ -186,6 +188,16 @@ function markupXml({
 }) {
   const markup = {
     Markup: {
+      ...(ifcFilename ? {
+        Header: {
+          File: {
+            "@_isExternal": "false",
+            Filename: ifcFilename,
+            Date: created,
+            Reference: ifcFilename,
+          },
+        },
+      } : {}),
       Topic: {
         "@_Guid": topicGuid,
         "@_TopicType": topicType,
@@ -195,23 +207,11 @@ function markupXml({
         CreationAuthor: author,
       },
       Viewpoints: {
-        ViewPoint: {
-          "@_Guid": viewpointGuid,
-          Viewpoint: `${viewpointGuid}.bcfv`,
-        },
+        "@_Guid": viewpointGuid,
+        Viewpoint: `${viewpointGuid}.bcfv`,
       },
     },
   };
-  if (ifcFilename) {
-    markup.Markup.Header = {
-      File: {
-        "@_isExternal": "false",
-        Filename: ifcFilename,
-        Date: created,
-        Reference: ifcFilename,
-      },
-    };
-  }
   return xmlDocument(markup);
 }
 
@@ -228,16 +228,16 @@ function viewpointXml({
       Component: selectedGlobalIds.map((guid) => ({ "@_IfcGuid": guid })),
     };
   }
-  if (isolatedGlobalIds.length > 0 || hiddenGlobalIds.length > 0) {
-    const defaultVisible = isolatedGlobalIds.length > 0 ? "false" : "true";
-    const exceptions = isolatedGlobalIds.length > 0 ? isolatedGlobalIds : hiddenGlobalIds;
-    components.Visibility = {
-      "@_DefaultVisibility": defaultVisible,
+  // BCF 2.1 requires Visibility even for selection-only or coloring-only views.
+  const exceptions = isolatedGlobalIds.length > 0 ? isolatedGlobalIds : hiddenGlobalIds;
+  components.Visibility = {
+    "@_DefaultVisibility": isolatedGlobalIds.length > 0 ? "false" : "true",
+    ...(exceptions.length > 0 ? {
       Exceptions: {
         Component: exceptions.map((guid) => ({ "@_IfcGuid": guid })),
       },
-    };
-  }
+    } : {}),
+  };
   if (coloredComponents.length > 0) {
     components.Coloring = {
       Color: coloredComponents.map((item) => ({

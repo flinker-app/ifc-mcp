@@ -3,13 +3,18 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import JSZip from "jszip";
 import { XMLParser } from "fast-xml-parser";
 import { createIfcMcpHost } from "../src-node/browser.js";
+import { IFCOPENSHELL_BUILD, PYODIDE_VERSION } from "../src-node/constants.js";
 import { bcfToolResult, toolError, toolResultText, pythonToolResult } from "../src-node/tool-results.js";
 import { executeIfcPython } from "../src-node/python-runner.js";
+import { readBenchmarkSource } from "../scripts/benchmark-source.mjs";
 
 // Opt-in live evals: no model judge, extra system prompt, or Python repair wrapper.
+const repository = fileURLToPath(new URL("../", import.meta.url));
+const benchmarkPaths = ["tests-node/prompts.eval.mjs", "tests-node/fixtures/prompt-model.ifc", "scripts/benchmark-source.mjs"];
 const MODEL = "gpt-5.6-luna";
 const tools = createIfcMcpHost().tools.map(({ name, description, inputSchema }) =>
   ({ type: "function", name, description, parameters: inputSchema, strict: false }));
@@ -95,14 +100,27 @@ test("Luna prompting with real IFC Python execution", { timeout: 1_800_000 }, as
   const apiKey = process.env.OPENAI_API_KEY;
   assert.ok(apiKey, "Set OPENAI_API_KEY and optionally OPENAI_BASE_URL; this opt-in suite makes live Luna calls.");
   const endpoint = `${(process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/$/, "")}/responses`;
-  const root = path.resolve(".ifc-mcp/evals", new Date().toISOString().replace(/[:.]/g, "-"));
+  const startedAt = new Date().toISOString();
+  const root = path.resolve(".ifc-mcp/evals", startedAt.replace(/[:.]/g, "-"));
+  const source = await readBenchmarkSource(repository, benchmarkPaths);
+  const provenance = {
+    source, startedAt, node: process.version, platform: process.platform, arch: process.arch,
+    model: MODEL, reasoning: "high", pyodide: PYODIDE_VERSION, ifcopenshell: IFCOPENSHELL_BUILD,
+    fixtureSha256: createHash("sha256").update(fixture).digest("hex"),
+    toolsSha256: createHash("sha256").update(JSON.stringify(tools)).digest("hex"),
+  };
   await fs.mkdir(root, { recursive: true });
   const results = [];
   const repeat = Number(process.env.IFC_EVAL_REPEAT || 1);
   assert.ok(Number.isInteger(repeat) && repeat >= 1 && repeat <= 10);
   const chosen = cases.filter(entry => !process.env.IFC_EVAL_FILTER || new RegExp(process.env.IFC_EVAL_FILTER).test(entry.id));
   assert.ok(chosen.length, "No eval cases match IFC_EVAL_FILTER");
+  await fs.writeFile(path.join(root, "manifest.json"), JSON.stringify({
+    ...provenance, selected: chosen.map(entry => entry.id), repetitions: repeat,
+  }, null, 2));
+  t.diagnostic(`Source: ${source.ref} at ${source.revision}${source.modified ? " with local changes" : ""}`);
   t.diagnostic(`Model: ${MODEL}, reasoning: high. Traces: ${root}`);
+  let sourceChanged = false;
   for (let repetition = 1; repetition <= repeat; repetition++) for (const entry of chosen) {
     await t.test(`${entry.id} #${repetition}`, { timeout: 180_000 }, async caseTest => {
       const started = performance.now();
@@ -211,17 +229,26 @@ test("Luna prompting with real IFC Python execution", { timeout: 1_800_000 }, as
       } catch (error) { run.passed = false; run.failure = error.message; throw error; }
       finally {
         run.seconds = (performance.now() - started) / 1000;
-        const trace = { ...run, artifacts: [...run.artifacts.values()], model: MODEL, reasoning: "high", toolDefinitions: tools };
+        const completedSource = await readBenchmarkSource(repository, benchmarkPaths);
+        sourceChanged = Object.keys(source).some(key => source[key] !== completedSource[key]);
+        if (sourceChanged) {
+          run.passed = false;
+          run.failure ??= "Repository source changed during the evaluation";
+        }
+        const trace = { ...run, artifacts: [...run.artifacts.values()], model: MODEL, reasoning: "high",
+          toolDefinitions: tools, provenance, ...(sourceChanged ? { completedSource } : {}) };
         await fs.writeFile(path.join(dir, "trace.json"), JSON.stringify(trace, null, 2));
         results.push({ id: entry.id, repetition, passed: run.passed, correctOutcome: run.correctOutcome === true,
           toolCalls: run.calls.length, pythonCalls: run.calls.filter(call => call.name === "run-python").length,
           pythonSeconds: run.calls.filter(call => call.executedPython).reduce((sum, call) => sum + call.seconds, 0),
           pythonErrors: run.calls.filter(call => call.executedPython && call.output.isError === true).length,
           toolErrors: run.calls.filter(call => call.output.isError === true && !(entry.feedback && call.name === "set-bcf-view")).length,
-          modelCalls: run.modelCalls, seconds: run.seconds, usage: run.usage, failure: run.failure });
+          modelCalls: run.modelCalls, seconds: run.seconds, usage: run.usage, failure: run.failure,
+          provenance, ...(sourceChanged ? { completedSource } : {}) });
         await fs.writeFile(path.join(root, "results.json"), JSON.stringify(results, null, 2));
         t.diagnostic(`${entry.id}: ${run.passed ? "PASS" : "FAIL"}, ${results.at(-1).pythonCalls} Python calls, ${results.at(-1).pythonErrors} Python errors, ${run.seconds.toFixed(1)}s`);
       }
     });
+    assert.equal(sourceChanged, false, "Repository source changed during the evaluation");
   }
 });
