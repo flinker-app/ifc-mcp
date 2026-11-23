@@ -14,8 +14,9 @@ async function macSandbox(stage) {
   const executable = await fs.realpath(process.execPath);
   const quote = JSON.stringify;
   const node = `(literal ${quote(executable)})`;
-  const systemLibraries = '(subpath "/usr/lib") (subpath "/System/Library") (subpath "/private/var/db/dyld")';
-  const ancestors = [stage, executable].flatMap(value => {
+  const libraryPaths = ["/usr/lib", "/System/Library", "/System/Volumes/Preboot/Cryptexes/OS", "/private/var/db/dyld"];
+  const systemLibraries = libraryPaths.map(value => `(subpath ${quote(value)})`).join(" ");
+  const ancestors = [stage, executable, ...libraryPaths].flatMap(value => {
     const directories = [];
     while (path.dirname(value) !== value) {
       value = path.dirname(value);
@@ -29,6 +30,7 @@ async function macSandbox(stage) {
     `(allow process-exec ${node})`,
     `(allow file-map-executable ${node} ${systemLibraries})`,
     "(allow sysctl-read)",
+    '(allow file-read* (literal "/"))',
     `(allow file-read-metadata ${Array.from(new Set(ancestors), value => `(literal ${quote(value)})`).join(" ")})`,
     `(allow file-read* ${node} (subpath ${quote(stage)}) ${systemLibraries}`,
     '  (literal "/dev/null") (literal "/dev/random") (literal "/dev/urandom"))',
