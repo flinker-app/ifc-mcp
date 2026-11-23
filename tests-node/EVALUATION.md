@@ -1,5 +1,8 @@
 # Luna evaluation results — 2026-09-14
 
+This is a historical run. New runs record their Git ref, commit and local
+source fingerprint in `manifest.json`, `results.json` and each case's trace.
+
 Model: `gpt-5.6-luna`, high reasoning. Live evaluations use the shared tool
 definitions, real SDK/Pyodide execution, and synthetic IFC data. There is no
 extra evaluation system prompt, model judge, or Python repair wrapper.

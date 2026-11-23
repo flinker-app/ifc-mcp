@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 
 import { build, transform } from "esbuild";
 import { syncServerMetadata } from "./sync-server-metadata.mjs";
+import { loadNodePythonWheel } from "../src-node/python-node-environment.js";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const dist = path.join(root, "dist");
@@ -17,6 +18,7 @@ const external = [
   "jszip",
   "zod",
   "zod/*",
+  "pyodide",
 ];
 
 await syncServerMetadata();
@@ -26,11 +28,17 @@ if ((await fs.lstat(dist).catch(error => { if (error.code !== "ENOENT") throw er
 await fs.rm(dist, { recursive: true, force: true });
 await fs.mkdir(path.dirname(viewerTarget), { recursive: true });
 await fs.copyFile(path.join(root, "src-node", "tool-results.d.ts"), path.join(dist, "tool-results.d.ts"));
+await fs.cp(path.join(root, "src-node", "python"), path.join(dist, "python"), {
+  recursive: true,
+  filter: source => path.basename(source) !== "__pycache__" && path.extname(source) !== ".pyc",
+});
+await fs.writeFile(path.join(dist, "python", "ifcopenshell.whl"), await loadNodePythonWheel());
 
 await build({
   entryPoints: {
     "ifc-mcp": path.join(root, "bin", "ifc-mcp.js"),
     server: path.join(root, "src-node", "server.js"),
+    "python-worker-node": path.join(root, "src-node", "python-worker-node.js"),
   },
   outdir: dist,
   bundle: true,
@@ -47,6 +55,7 @@ await build({
   entryPoints: {
     browser: path.join(root, "src-node", "browser.js"),
     "tool-results": path.join(root, "src-node", "tool-results.js"),
+    "python-worker-browser": path.join(root, "src-node", "python-worker-browser.js"),
   },
   outdir: dist,
   bundle: true,

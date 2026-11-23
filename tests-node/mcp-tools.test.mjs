@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { viewerFetch } from "./fixtures/viewer-http.mjs";
 import JSZip from "jszip";
 
 import { Client } from "@modelcontextprotocol/client";
@@ -31,17 +32,23 @@ test("MCP run-python schema uses plural files and explains file inputs", async (
     assert.ok(showFile, "show-ifc-file tool should be registered");
     assert.ok(clearViewer, "clear-ifc-viewer tool should be registered");
     assert.ok(setView, "set-bcf-view tool should be registered");
+    assert.deepEqual(tools.tools.map(tool => tool.name).sort(), [
+      "clear-ifc-viewer", "open-ifc-viewer", "run-python", "set-bcf-view", "show-ifc-file",
+    ]);
     assert.equal(tools.tools.some((tool) => tool.name === "open_ifc_viewer"), false);
     assert.equal(tools.tools.some((tool) => tool.name === "set_ifc_viewer_bcf_state"), false);
     assert.equal(tools.tools.some((tool) => tool.name === "set-ifc-view"), false);
     assert.equal(tools.tools.some((tool) => tool.name === "load-ifc-file"), false);
     assert.equal(tools.tools.some((tool) => tool.name === "update-ifc-viewer"), false);
     assert.deepEqual(runPython.inputSchema.required, ["files", "code"]);
-    assert.match(runPython.description, /Pyodide 0\.28\.2/);
+    assert.match(runPython.description, /Pyodide 0\.28\.3/);
     assert.match(runPython.description, /ifcopenshell/);
+    assert.match(runPython.description, /Fix failures, retest/);
+    assert.match(runPython.description, /partial outputs before repeating an interrupted run/);
     assert.equal("file_path" in runPython.inputSchema.properties, false);
     assert.match(runPython.inputSchema.properties.code.description, /ifcopenshell\.open\("model\.ifc"\)/i);
     assert.match(runPython.inputSchema.properties.files.description, /Desktop hosts[\s\S]*browser hosts/i);
+    assert.match(runPython.inputSchema.properties.files.description, /viewer_files.*tool_path/);
     assert.equal("working_directory" in runPython.inputSchema.properties, false);
     assert.equal("max_output_chars" in runPython.inputSchema.properties, false);
     assert.match(openViewer.description, /browser or webview/);
@@ -63,6 +70,9 @@ test("MCP run-python schema uses plural files and explains file inputs", async (
     assert.deepEqual(Object.keys(clearViewer.inputSchema.properties).sort(), []);
     assert.match(clearViewer.description, /removing all loaded IFC files/i);
     assert.match(setView.description, /BCF\/BCFZIP viewpoint file/);
+    assert.match(setView.description, /Inspect the returned viewer screenshot before confirming visual success\./);
+    assert.match(setView.description, /Correct visual mismatches and check a fresh screenshot/);
+    assert.match(setView.description, /element_filter_mode/);
     assert.match(setView.description, /saved_files\[0\]\.url/);
     assert.match(setView.description, /```python[\s\S]*view\.bcfzip[\s\S]*```/);
     assert.match(setView.description, /from bcf\.v3\.bcfxml import BcfXml/);
@@ -175,7 +185,7 @@ print(json.dumps({
   });
 });
 
-test("MCP run-python parses sample IFC through the real CDN Pyodide runtime", async () => {
+test("MCP run-python parses sample IFC through the local Pyodide worker runtime", async () => {
   await withMcpClient(async (client) => {
     const output = await callRunPython(client, {
       files: [sampleIfc],
@@ -201,7 +211,7 @@ print(json.dumps({
   });
 });
 
-test("MCP run-python validates sample IFC through the real CDN Pyodide runtime", async () => {
+test("MCP run-python validates sample IFC through the local Pyodide worker runtime", async () => {
   await withMcpClient(async (client) => {
     const output = await callRunPython(client, {
       files: [sampleIfc],
@@ -379,8 +389,8 @@ test("MCP viewer tools use one stable viewer URL and can update the same viewer"
     assert.equal(loadedAgain.model_count, 1);
     assert.equal(loadedAgain.added_model, false);
 
-    const exchange = (message = {}) => fetch(`${opened.url}/state`, {
-      method: "POST", headers: { Origin: opened.url, "Content-Type": "application/json" },
+    const exchange = (message = {}) => viewerFetch(opened.url, "/state", {
+      method: "POST", headers: { Origin: openedUrl.origin, "Content-Type": "application/json" },
       body: JSON.stringify(message),
     });
     assert.equal((await exchange()).status, 200);
@@ -399,8 +409,8 @@ test("MCP viewer tools use one stable viewer URL and can update the same viewer"
     assert.ok(state.bcf_topic_guid);
 
     assert.equal((await exchange({ id: state.request_id, result: toolResult("Viewer updated.") })).status, 409);
-    assert.equal((await fetch(`${opened.url}/bcf-feedback`, { method: "POST" })).status, 404);
-    assert.equal((await fetch(`${opened.url}/state`, { method: "POST", body: "{}" })).status, 403);
+    assert.equal((await viewerFetch(opened.url, "/bcf-feedback", { method: "POST" })).status, 404);
+    assert.equal((await viewerFetch(opened.url, "/state", { method: "POST", body: "{}" })).status, 403);
 
     const clearing = callJsonTool(client, "clear-ifc-viewer", {});
     const clearState = await waitForViewerRequest(opened.url);
@@ -417,7 +427,7 @@ test("MCP viewer tools use one stable viewer URL and can update the same viewer"
 
 async function waitForViewerRequest(url) {
   for (let attempt = 0; attempt < 100; attempt++) {
-    const state = await (await fetch(`${url}/state`)).json();
+    const state = await (await viewerFetch(url, "/state")).json();
     if (state.request_id) return state;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }

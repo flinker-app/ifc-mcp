@@ -28,8 +28,28 @@ download link. If you ask to view a model, IFC MCP opens a local viewer link.
 If your AI client does not open that link automatically, open it in your
 browser.
 
+The browser viewer and generated downloads share one localhost HTTP server per
+IFC MCP process. It tries port `8765` and automatically selects a free port if
+that port is occupied. Open the complete viewer URL returned by the tool.
+The token after `#` authorizes access to models and view state and stays valid
+until IFC MCP stops. Clearing the viewer keeps that server running. Disconnecting
+or stopping IFC MCP closes the server and expires its temporary download links.
+
 Large IFC files can take more than a minute to process. Cancelling a request
-does not stop Python already running; wait for it to finish before trying again.
+terminates its local Python worker. The next call starts a fresh runtime.
+
+The Python runner and its WASM compatibility helpers live in this repository;
+the Flinker Copilot SDK is no longer downloaded or evaluated. Node uses the
+pinned `pyodide` npm package (0.28.3). The package includes the checksum-verified
+IfcOpenShell wheel. Other Python dependencies download on first use; Node caches
+the WASM assets locally.
+The browser entry uses the same Python source and a local Web Worker.
+
+IFC MCP accepts IFC and IFCZIP files.
+
+Use `run-python` with `bcf-client` to create BCF viewpoints, including
+orthographic cameras. The connected browser viewer returns a rendered screenshot
+with the application status and issues from `set-bcf-view`.
 
 ## Installation
 
@@ -328,6 +348,25 @@ npm test
 
 The workspace includes `.vscode/mcp.json`, so VS Code can run the server from
 this checkout.
+
+`npm test` includes real stdio subprocesses, malformed protocol and viewer
+requests, concurrent startup and shutdown, download expiry and storage limits,
+and the local Python runtime.
+The process and browser fixtures follow the approaches in the
+[MCP SDK testing guide](https://ts.sdk.modelcontextprotocol.io/v2/testing) and
+[Playwright MCP tests](https://github.com/microsoft/playwright-mcp/blob/main/tests/fixtures.ts).
+
+To test the built server with the published viewer SDK in Chromium:
+
+```powershell
+npx playwright install chromium
+npm run test:browser
+```
+
+The browser suite loads a real IFC wall, checks reload and BCF selection/color
+round trips, verifies recovery from invalid IFC, and checks port cleanup.
+It needs access to the pinned viewer SDK on Flinker's CDN. Failure screenshots,
+traces, and the HTML report are saved under `.ifc-mcp/`.
 
 ## Security
 

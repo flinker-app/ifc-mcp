@@ -6,8 +6,19 @@ third-party packages or remote runtime artifacts used by this project.
 The following Flinker CDN artifacts are loaded at runtime and are separately
 licensed unless their served files or accompanying documentation state otherwise:
 
-- https://cdn.flinker.app/ifc-copilot/v1.0.1/ifc-copilot.es.js
-- https://cdn.flinker.app/ifc-viewer/v3.4.6/ifc-viewer.es.js
+- https://cdn.flinker.app/ifc-viewer/v4.0.31/ifc-viewer.es.js
+
+The Python display helpers include Flinker IFC Copilot 1.0.1 code.
+
+The bundled IfcOpenShell wheel includes a modified OpenCascade triangle BVH
+plugin. The patch and rebuild instructions are in
+vendor/ifcopenshell/single-thread-clash.patch. OpenCascade's LGPL 2.1 license and
+exception are in vendor/ifcopenshell/licenses/. The build uses Boost (BSL-1.0)
+and Eigen (MPL-2.0) headers.
+
+- Pyodide (MPL-2.0) — https://github.com/pyodide/pyodide
+- IfcOpenShell, bcf-client, and ifcclash (LGPL-3.0-or-later) — https://github.com/IfcOpenShell/IfcOpenShell
+- IfcOpenShell WASM wheels — https://github.com/IfcOpenShell/wasm-wheels
 
 npm dependencies keep their own upstream licenses. See package-lock.json for
 the dependency tree and resolved package versions.

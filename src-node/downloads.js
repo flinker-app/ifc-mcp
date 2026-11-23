@@ -46,9 +46,11 @@ export function getDownload(id) {
   return download;
 }
 
-export function resetDownloadsForTests() {
+export function clearDownloads() {
   downloads.clear();
 }
+
+export const resetDownloadsForTests = clearDownloads;
 
 function publicDownload(download) {
   return {

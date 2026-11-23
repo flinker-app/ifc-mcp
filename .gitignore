@@ -3,6 +3,7 @@ node_modules/
 
 # Runtime output
 .ifc-mcp/
+/evals/
 coverage/
 .nyc_output/
 
@@ -22,6 +23,8 @@ pnpm-debug.log*
 # Package artifacts
 *.tgz
 dist/
+__pycache__/
+*.pyc
 
 # OS/editor noise
 .DS_Store

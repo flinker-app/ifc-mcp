@@ -1,9 +1,8 @@
-import { DEFAULT_COPILOT_SDK_URL } from "./constants.js";
 import { createIfcMcpToolHandlers } from "./host-handlers.js";
 import { bcfToolResult } from "./tool-results.js";
 
 let requestSequence = 0;
-const runningSdks = new WeakSet();
+const runningRuntimes = new WeakSet();
 
 function createRequestId() {
   if (typeof globalThis.crypto?.randomUUID === "function") return globalThis.crypto.randomUUID();
@@ -13,7 +12,7 @@ function createRequestId() {
 
 // Files and generated downloads belong to this browser host, never an HTTP server.
 export function createIfcMcpBrowserRuntime({ files, viewer,
-  loadPython = () => import(/* @vite-ignore */ DEFAULT_COPILOT_SDK_URL),
+  loadPython = () => import("./python-browser.js"),
 }) {
   const generated = new Map();
   let running = false;
@@ -42,8 +41,8 @@ export function createIfcMcpBrowserRuntime({ files, viewer,
       const attachments = inputs.map(({ name, bytes }) => ({ name, buffer: bytes.buffer }));
       const sdk = await loadPython();
       signal?.throwIfAborted();
-      if (runningSdks.has(sdk)) throw new Error("The previous Python call is still running. Wait for it to finish.");
-      runningSdks.add(sdk);
+      if (runningRuntimes.has(sdk)) throw new Error("The previous Python call is still running. Wait for it to finish.");
+      runningRuntimes.add(sdk);
       activeSdk = sdk;
       output = await sdk.runPythonInWorker(code, attachments, { requestId: createRequestId(), signal });
       signal?.throwIfAborted();
@@ -68,7 +67,7 @@ export function createIfcMcpBrowserRuntime({ files, viewer,
         uploaded_files: inputs.map(({ name }) => ({ name })),
       };
     } finally {
-      if (activeSdk) runningSdks.delete(activeSdk);
+      if (activeSdk) runningRuntimes.delete(activeSdk);
       if (signal?.aborted) {
         for (const item of [...(output?.files ?? []), ...(output?.displayFiles ?? [])]) {
           if (item.url) URL.revokeObjectURL(item.url);
