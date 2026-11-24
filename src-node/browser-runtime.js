@@ -1,4 +1,5 @@
 import { createIfcMcpToolHandlers } from "./host-handlers.js";
+import { createBrowserPythonRuntime } from "./python-browser.js";
 import { bcfToolResult } from "./tool-results.js";
 
 let requestSequence = 0;
@@ -13,9 +14,8 @@ function createRequestId() {
 }
 
 // Files and generated downloads belong to this browser host, never an HTTP server.
-export function createIfcMcpBrowserRuntime({ files, viewer,
-  loadPython = () => import("./python-browser.js"),
-}) {
+export function createIfcMcpBrowserRuntime({ files, viewer, loadPython }) {
+  const defaultPython = loadPython ? null : createBrowserPythonRuntime();
   const generated = new Map();
   let running = false;
 
@@ -43,7 +43,7 @@ export function createIfcMcpBrowserRuntime({ files, viewer,
     let output;
     try {
       const inputs = references.map(resolveSource);
-      const sdk = await loadPython();
+      const sdk = loadPython ? await loadPython() : defaultPython;
       const attachments = sdk.acceptsFileBlobs
         ? inputs.map(({ name, source }) => ({ name, blob: source instanceof Blob ? source : new Blob([source]) }))
         : await Promise.all(inputs.map(async ({ name, source }) => ({ name, buffer: (await readBytes(source)).buffer })));
@@ -86,6 +86,7 @@ export function createIfcMcpBrowserRuntime({ files, viewer,
   }
 
   return {
+    resetPythonSession: defaultPython?.reset,
     handlers: createIfcMcpToolHandlers({
       "run-python": runPython,
       "open-ifc-viewer": viewer && (async request => {

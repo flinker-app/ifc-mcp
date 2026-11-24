@@ -66,8 +66,10 @@ for name in ("Clasher", "ClashSettings", "ClashResult", "ClashSet", "ClashSource
   }
 
   return async (code, attachments = [], options = {}) => {
-    options.onProgress?.({ stage: "loading-runtime", message: "Loading Python runtime" });
-    if (!ready) ready = initialize().catch(error => { ready = undefined; throw error; });
+    if (!ready) {
+      options.onProgress?.({ stage: "loading-runtime", message: "Loading Python runtime" });
+      ready = initialize().catch(error => { ready = undefined; throw error; });
+    }
     const py = await ready;
     py.runPython("_ifc_mcp_reset_files()");
     const names = new Set();

@@ -39,9 +39,9 @@ Large IFC files can take more than a minute to process. Cancelling a request
 terminates its local Python worker. The next call starts a fresh runtime.
 
 The package includes Pyodide 0.28.3, the checksum-verified IfcOpenShell wheel,
-and the other Python packages needed for offline execution. `run-python` starts
-a fresh sandbox for each call. The desktop CLI uses the platform sandbox, and
-the browser entry runs Python in a sandboxed iframe with its own worker.
+and the other Python packages needed for offline execution. The desktop CLI
+starts a fresh platform sandbox for each call. Each browser host reuses one
+network-blocked worker inside its own sandboxed iframe.
 
 IFC MCP accepts IFC and IFCZIP files.
 
@@ -342,8 +342,14 @@ Use `host.tools` for the tool definitions and `host.getGeneratedFiles()` for
 generated downloads. Call `host.clearFiles()` when those downloads are no longer needed.
 
 When serving the built browser entry, serve `python-worker-browser.js` and the
-`python/` directory beside it. The sandbox loads these assets before executing
-Python. The browser host must allow a sandboxed iframe and a blob worker.
+`python/` directory beside it. The browser host must allow a sandboxed iframe
+and a blob worker.
+
+Keep one `createIfcMcpHost()` instance for each session whose calls may share
+data. Each call supplies its selected files and the worker clears its working
+directory after execution. Python memory can retain data from earlier calls in
+the session. Call `host.resetPythonSession()` to discard the worker and its
+memory. The next call starts a fresh worker.
 
 </details>
 

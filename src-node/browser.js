@@ -26,6 +26,7 @@ export function createIfcMcpHost({
 
   return {
     ...(runtime ? { getGeneratedFiles: runtime.getGeneratedFiles, clearFiles: runtime.clearFiles } : {}),
+    ...(runtime?.resetPythonSession ? { resetPythonSession: runtime.resetPythonSession } : {}),
     tools: IFC_MCP_TOOL_DEFINITIONS.map(publicToolDefinition),
 
     async handleToolCall(toolCall, options) {

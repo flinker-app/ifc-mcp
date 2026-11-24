@@ -9,17 +9,22 @@ const sandboxSource = `<!doctype html>
   addEventListener("message", event => {
     if (event.source !== parent || event.ports.length !== 1) return;
     const port = event.ports[0];
-    const { scripts, ...input } = event.data;
-    const url = URL.createObjectURL(new Blob(scripts, { type: "text/javascript" }));
-    const worker = new Worker(url);
-    worker.onmessage = event => port.postMessage(event.data);
-    worker.onerror = event => port.postMessage({ error: event.message || "Python worker failed" });
-    worker.postMessage(input);
+    const { scripts, ...assets } = event.data;
+    try {
+      const url = URL.createObjectURL(new Blob(scripts, { type: "text/javascript" }));
+      const worker = new Worker(url);
+      const { port1, port2 } = new MessageChannel();
+      port1.onmessage = ({ data }) => port.postMessage(data);
+      port1.onmessageerror = () => port.postMessage({ error: "Could not read Python worker output." });
+      worker.onerror = event => port.postMessage({ error: event.message || "Python worker failed" });
+      worker.onmessageerror = () => port.postMessage({ error: "Could not read Python worker input." });
+      port.onmessage = ({ data }) => port1.postMessage(data);
+      worker.postMessage(assets, [port2]);
+    } catch (error) {
+      port.postMessage({ error: error.message || "Could not start the Python worker." });
+    }
   }, { once: true });
 </script>`;
-
-let active;
-export const acceptsFileBlobs = true;
 
 async function asset(name, format, signal) {
   const response = await fetch(new URL(name, import.meta.url), { credentials: "same-origin", signal });
@@ -44,66 +49,119 @@ async function loadAssets(signal) {
   return { lock, scripts: scripts.map(script => `${script}\n`), wheel, sources: Object.fromEntries(sources), binaries };
 }
 
-export async function runPythonInWorker(code, files = [], options = {}) {
-  if (active) throw new Error("The previous Python call is still running. Wait for it to finish.");
-  options.signal?.throwIfAborted();
-  const operation = new AbortController();
-  const normalized = normalizePythonOptions(options);
-  active = operation;
-  const onAbort = () => operation.abort(options.signal.reason);
-  options.signal?.addEventListener("abort", onAbort, { once: true });
-  let frame;
-  let channel;
-  let startupTimer;
-  try {
-    const assets = await loadAssets(operation.signal);
-    operation.signal.throwIfAborted();
-    frame = document.createElement("iframe");
-    frame.hidden = true;
-    frame.setAttribute("sandbox", "allow-scripts");
-    frame.srcdoc = sandboxSource;
-    channel = new MessageChannel();
-    const result = new Promise((resolve, reject) => {
-      startupTimer = setTimeout(() => reject(new Error("Could not start the browser Python sandbox.")), 15_000);
-      channel.port1.onmessage = ({ data }) => {
-        clearTimeout(startupTimer);
-        if (!data || typeof data !== "object") {
-          reject(new Error("Invalid Python sandbox message."));
-          return;
-        }
-        if (data.progress) options.onProgress?.(data.progress);
-        else if (data.error) reject(Object.assign(new Error(data.error), { stderr: data.stderr }));
-        else {
-          const output = data.output;
-          if (!output || !Array.isArray(output.files)) {
-            reject(new Error("Invalid Python sandbox output."));
-            return;
-          }
-          // Accept output bytes from Python, never URLs or callbacks supplied by the worker.
-          resolve({ result: output.result, stdout: output.stdout, stderr: output.stderr,
-            files: output.files.filter(file => file && typeof file.path === "string" && file.blob instanceof Blob)
-              .map(({ path, blob }) => ({ path, blob })) });
-        }
-      };
-      channel.port1.onmessageerror = () => reject(new Error("Could not read Python sandbox output."));
-      frame.onload = () => {
-        frame.onload = null;
-        frame.contentWindow?.postMessage({ ...assets, code, files, options: normalized }, "*", [channel.port2]);
-      };
-      document.body.append(frame);
-    });
-    return await abortable(result, operation.signal);
-  } finally {
-    operation.abort();
-    clearTimeout(startupTimer);
-    frame?.remove();
-    channel?.port1.close();
-    channel?.port2.close();
-    options.signal?.removeEventListener("abort", onAbort);
-    if (active === operation) active = undefined;
+function createSandbox(assets) {
+  const frame = document.createElement("iframe");
+  frame.hidden = true;
+  frame.setAttribute("sandbox", "allow-scripts");
+  frame.srcdoc = sandboxSource;
+  const { port1, port2 } = new MessageChannel();
+  const lifetime = new AbortController();
+  let receive;
+  let timer;
+  let launched = false;
+
+  function close(reason) {
+    if (lifetime.signal.aborted) return;
+    lifetime.abort(reason);
+    clearTimeout(timer);
+    frame.onload = null;
+    frame.remove();
+    port1.close();
+    port2.close();
   }
+
+  port1.onmessage = ({ data }) => {
+    clearTimeout(timer);
+    if (!data || typeof data !== "object") close(new Error("Invalid Python sandbox message."));
+    else if (data.error) close(Object.assign(new Error(data.error), { stderr: data.stderr }));
+    else receive?.(data);
+  };
+  port1.onmessageerror = () => close(new Error("Could not read Python sandbox output."));
+
+  return {
+    close,
+    get closed() { return lifetime.signal.aborted; },
+    run(input, onProgress) {
+      lifetime.signal.throwIfAborted();
+      return abortable(new Promise(resolve => {
+        receive = ({ progress, output }) => {
+          if (progress) {
+            onProgress?.(progress);
+          } else if (output && Array.isArray(output.files)) {
+            receive = undefined;
+            // Only pass output bytes from Python across the sandbox boundary.
+            resolve({ result: output.result, stdout: output.stdout, stderr: output.stderr,
+              files: output.files.filter(file => file && typeof file.path === "string" && file.blob instanceof Blob)
+                .map(({ path, blob }) => ({ path, blob })) });
+          } else {
+            close(new Error("Invalid Python sandbox output."));
+          }
+        };
+        if (launched) {
+          port1.postMessage(input);
+        } else {
+          launched = true;
+          timer = setTimeout(() => close(new Error("Could not start the browser Python sandbox.")), 15_000);
+          frame.onload = () => {
+            frame.onload = null;
+            try {
+              frame.contentWindow.postMessage({ ...assets, input }, "*", [port2]);
+            } catch (error) {
+              close(error);
+            }
+          };
+          document.body.append(frame);
+        }
+      }), lifetime.signal);
+    },
+  };
 }
 
-export function closePythonRuntime() {
-  active?.abort(new Error("Python runtime closed"));
+export function createBrowserPythonRuntime() {
+  let sandbox;
+  let active;
+
+  function discardSandbox(reason) {
+    sandbox?.close(reason);
+    sandbox = undefined;
+    globalThis.removeEventListener?.("pagehide", reset);
+  }
+
+  function reset() {
+    const reason = new Error("Python session reset");
+    active?.abort(reason);
+    discardSandbox(reason);
+  }
+
+  return {
+    acceptsFileBlobs: true,
+    reset,
+    async runPythonInWorker(code, files = [], options = {}) {
+      if (active) throw new Error("The previous Python call is still running. Wait for it to finish.");
+      options.signal?.throwIfAborted();
+      const input = { code, files, options: normalizePythonOptions(options) };
+      const operation = new AbortController();
+      const signal = operation.signal;
+      active = operation;
+      const onAbort = () => operation.abort(options.signal.reason);
+      options.signal?.addEventListener("abort", onAbort, { once: true });
+      if (options.signal?.aborted) onAbort();
+      try {
+        if (!sandbox || sandbox.closed) {
+          globalThis.addEventListener("pagehide", reset);
+          const assets = await abortable(loadAssets(signal), signal);
+          sandbox = createSandbox(assets);
+        }
+        signal.throwIfAborted();
+        return await abortable(sandbox.run(input, options.onProgress), signal);
+      } catch (error) {
+        discardSandbox(error);
+        throw error;
+      } finally {
+        operation.abort();
+        options.signal?.removeEventListener("abort", onAbort);
+        active = undefined;
+      }
+    },
+  };
 }
