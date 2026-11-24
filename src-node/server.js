@@ -13,7 +13,11 @@ import { stopViewerServer } from "./viewer.js";
 
 const { name, version } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 
-export function createServer({
+export function createServer(options) {
+  return buildServer(options);
+}
+
+function buildServer({
   desktopViewer = null,
   viewer = null,
   python = null,
@@ -22,9 +26,10 @@ export function createServer({
   fileHandoffEntry = null,
   timeoutMs,
   maxConcurrentCalls,
-} = {}, runtime = createLocalPythonRuntime()) {
+} = {}, stdioRuntime) {
   configureDesktopViewer(desktopViewer);
 
+  const runtime = stdioRuntime ?? createLocalPythonRuntime();
   const defaultHandlers = createDefaultIfcMcpToolHandlers(fileHandoffEntry, runtime);
   const hostHandlers = createIfcMcpHostHandlers({ viewer, python });
   const toolHost = createIfcMcpToolHost({
@@ -45,8 +50,16 @@ export function createServer({
     void runtime.reset()?.catch(error => console.error(error));
   };
   server.setRequestHandler("tools/list", () => ({ tools: toolHost.tools.map(publicToolDefinition) }));
-  server.setRequestHandler("tools/call", ({ params }, { mcpReq }) =>
-    toolHost.callTool(params.name, params.arguments, { signal: mcpReq.signal }));
+  let checkedClient = false;
+  server.setRequestHandler("tools/call", ({ params }, { mcpReq }) => {
+    if (stdioRuntime && !checkedClient) {
+      checkedClient = true;
+      const client = mcpReq.envelope?.clientInfo ?? server.getClientVersion();
+      // Codex gives each conversation its own local MCP connection.
+      if (client?.name === "codex-mcp-client") runtime.keepWarmForChat();
+    }
+    return toolHost.callTool(params.name, params.arguments, { signal: mcpReq.signal });
+  });
 
   return server;
 }
@@ -55,7 +68,7 @@ export async function main(options = {}) {
   const reportError = error => console.error(error);
   const transport = new StdioServerTransport();
   const runtime = createLocalPythonRuntime();
-  const handle = serveStdio(() => createServer(options, runtime), { transport, onerror: reportError });
+  const handle = serveStdio(() => buildServer(options, runtime), { transport, onerror: reportError });
   let shutdown;
   const close = () => {
     if (!shutdown) {

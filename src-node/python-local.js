@@ -14,24 +14,29 @@ const windowsLauncher = process.platform === "win32" ? fileURLToPath(new URL("sa
 
 export function createLocalPythonRuntime() {
   const session = createPythonSession(openSandbox);
-  let approvals = new Set();
+  const approvals = new Set();
+  let keepWarmForChat = false;
   function reset() {
     approvals.clear();
     return session.reset();
   }
   return {
     readsLocalFiles: true,
+    keepWarmForChat() { keepWarmForChat = true; },
     reset,
     revoke(id) {
       if (id === undefined || approvals.has(id)) return reset();
     },
     runPythonInWorker(code, files = [], options = {}) {
-      // A different set of inputs needs a clean worker. Only trusted approval
-      // records carry an identity that can be used to keep the worker warm.
-      const scope = files.every(file => file.approval)
-        ? JSON.stringify(files.map(({ name, approval }) => JSON.stringify([name, approval])).sort())
-        : Symbol();
-      approvals = new Set(files.map(file => file.approval));
+      let scope;
+      if (!keepWarmForChat) {
+        // Clients with no known chat boundary reuse only for the same inputs.
+        scope = files.every(file => file.approval)
+          ? JSON.stringify(files.map(({ name, approval }) => JSON.stringify([name, approval])).sort())
+          : Symbol();
+        approvals.clear();
+      }
+      for (const file of files) if (file.approval) approvals.add(file.approval);
       return session.runPythonInWorker(code, files, { ...options, scope });
     },
   };

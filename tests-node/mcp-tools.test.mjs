@@ -229,6 +229,45 @@ result = process.pid
   }, { ...process.env, TMPDIR: cache, TMP: cache, TEMP: cache });
 });
 
+test("the desktop Python sandbox keeps Pyodide warm across files in a Codex chat", async () => {
+  await withMcpClient(async client => {
+    const { file_picker_url } = await callJsonTool(client, "open-ifc-viewer", {});
+    const firstFile = await approvePythonFile(file_picker_url, sampleIfc);
+    const secondFile = await approvePythonFile(file_picker_url, path.join(repoRoot, "tests-browser", "fixtures", "wall.ifc"));
+    const first = await callJsonTool(client, "run-python", { files: [firstFile], code: `
+from pathlib import Path
+from js import process
+assert Path('sample.ifc').is_file()
+Path('/tmp/ifc-mcp-codex-marker').touch()
+result = process.pid
+` });
+    const second = await callJsonTool(client, "run-python", { files: [secondFile], code: `
+from pathlib import Path
+from js import process
+assert Path('wall.ifc').is_file()
+assert not Path('sample.ifc').exists()
+assert Path('/tmp/ifc-mcp-codex-marker').exists()
+result = process.pid
+` });
+    assert.equal(second.result, first.result);
+    const withoutFile = await callJsonTool(client, "run-python", { files: [], code: "from js import process; result = process.pid" });
+    assert.equal(withoutFile.result, first.result);
+
+    const picker = new URL(file_picker_url);
+    const revoke = new URL("/python-files/approved", picker);
+    revoke.searchParams.set("id", firstFile);
+    const response = await fetch(revoke, { method: "DELETE", headers: { Origin: picker.origin, "X-IFC-Python-File-Token": picker.hash.slice(1) } });
+    assert.equal((await response.json()).removed, true);
+    const afterRevocation = await callJsonTool(client, "run-python", { files: [], code: `
+from pathlib import Path
+from js import process
+assert not Path('/tmp/ifc-mcp-codex-marker').exists()
+result = process.pid
+` });
+    assert.notEqual(afterRevocation.result, first.result);
+  }, process.env, "codex-mcp-client");
+});
+
 test("desktop file handoff cleans up a partial batch when the client cannot open an input", async () => {
   await withMcpClient(async client => {
     const missing = path.join(os.tmpdir(), `missing-${crypto.randomUUID()}.ifc`);
@@ -586,13 +625,13 @@ async function waitForViewerRequest(url) {
   throw new Error("Viewer request was not queued.");
 }
 
-async function withMcpClient(callback, env = process.env) {
+async function withMcpClient(callback, env = process.env, clientName = "ifc-mcp-tools-test") {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [process.env.IFC_MCP_TEST_BIN || "bin/ifc-mcp.js"],
     env,
   });
-  const client = new Client({ name: "ifc-mcp-tools-test", version: "0.1.0" });
+  const client = new Client({ name: clientName, version: "0.1.0" });
   await client.connect(transport);
   try {
     await callback(client);
