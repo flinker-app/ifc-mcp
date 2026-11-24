@@ -20,9 +20,13 @@ const baseline = {
 if (isMainThread && process.argv[2] === "--memory") {
   const { benchmarkMemory } = await import("./benchmark-memory.mjs");
   await benchmarkMemory(repository, process.argv.slice(3));
+} else if (isMainThread && process.argv[2] !== "--parser") {
+  const { benchmarkBrowser } = await import("./benchmark-browser.mjs");
+  const toolOnly = process.argv[2] === "--browser";
+  await benchmarkBrowser(repository, process.argv.slice(toolOnly ? 3 : 2), { toolOnly });
 } else if (isMainThread) {
   const source = await readBenchmarkSource(repository, benchmarkPaths);
-  const files = process.argv.slice(2).map(file => path.resolve(file));
+  const files = process.argv.slice(3).map(file => path.resolve(file));
   if (!files.length) files.push(path.resolve("examples/sample.ifc"));
   const repeats = Number(process.env.IFC_BENCHMARK_REPEATS || 7);
   assert.ok(Number.isInteger(repeats) && repeats >= 3, "IFC_BENCHMARK_REPEATS must be at least 3");
