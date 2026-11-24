@@ -25,7 +25,8 @@ Runtime context: Pyodide uses
 the bundled Pyodide ${PYODIDE_VERSION} runtime and IfcOpenShell ${IFCOPENSHELL_BUILD.version} (${IFCOPENSHELL_BUILD.revision}).
 The package set includes micropip, ifcopenshell, numpy, pandas,
 matplotlib, shapely, bcf-client, ifcclash, plotly, and typing-extensions.
-Each call has a fresh namespace and only the attached input files.
+Each call runs in a fresh namespace and mounts the files listed in its inputs.
+The built-in browser worker can retain data across calls in the same session.
 Keep the opened model assigned to a variable while accessing its entities.
 Native IFC-to-SVG export is unavailable in this runtime.
 

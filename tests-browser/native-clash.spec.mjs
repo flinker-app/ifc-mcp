@@ -126,6 +126,13 @@ print('new session')
     expect(other.originalFrameIntact).toBe(true);
     await expect(page.locator("iframe")).toHaveCount(1);
 
+    await page.evaluate(() => window.testHost.resetPythonSession());
+    await expect(page.locator("iframe")).toHaveCount(0);
+    const reset = await page.evaluate(code =>
+      window.testHost.handleToolCall({ name: "run-python", arguments: { files: [], code } }), cleanSession);
+    expect(reset.isError, JSON.stringify(reset.content)).toBe(false);
+    expect(reset.structuredContent.stdout).toBe("new session\n");
+
     const running = page.waitForEvent("console", message => message.text() === "IFC MCP cancellation test running");
     await page.evaluate(() => {
       const controller = new AbortController();

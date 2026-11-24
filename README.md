@@ -342,14 +342,11 @@ Use `host.tools` for the tool definitions and `host.getGeneratedFiles()` for
 generated downloads. Call `host.clearFiles()` when those downloads are no longer needed.
 
 When serving the built browser entry, serve `python-worker-browser.js` and the
-`python/` directory beside it. The browser host must allow a sandboxed iframe
-and a blob worker.
+`python/` directory beside it. The sandbox loads these assets before executing
+Python. The browser host must allow a sandboxed iframe and a blob worker.
 
-Keep one `createIfcMcpHost()` instance for each session whose calls may share
-data. Each call supplies its selected files and the worker clears its working
-directory after execution. Python memory can retain data from earlier calls in
-the session. Call `host.resetPythonSession()` to discard the worker and its
-memory. The next call starts a fresh worker.
+Use one browser host per session. Python can retain data between calls. Call
+`host.resetPythonSession()` when the session ends or file access is revoked.
 
 </details>
 
