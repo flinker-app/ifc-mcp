@@ -7,7 +7,8 @@ import { createIfcMcpHostHandlers } from "./host-handlers.js";
 import { createIfcMcpToolHost } from "./tool-host.js";
 import { configureDesktopViewer } from "./desktop-viewer.js";
 import { publicToolDefinition } from "./tool-definitions.js";
-import { closePythonRuntime } from "./python-local.js";
+import { createLocalPythonRuntime } from "./python-local.js";
+import { onPythonFileRevocation } from "./approved-python-files.js";
 import { stopViewerServer } from "./viewer.js";
 
 const { name, version } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
@@ -21,10 +22,10 @@ export function createServer({
   fileHandoffEntry = null,
   timeoutMs,
   maxConcurrentCalls,
-} = {}) {
+} = {}, runtime = createLocalPythonRuntime()) {
   configureDesktopViewer(desktopViewer);
 
-  const defaultHandlers = createDefaultIfcMcpToolHandlers(fileHandoffEntry);
+  const defaultHandlers = createDefaultIfcMcpToolHandlers(fileHandoffEntry, runtime);
   const hostHandlers = createIfcMcpHostHandlers({ viewer, python });
   const toolHost = createIfcMcpToolHost({
     defaultHandlers: {
@@ -38,6 +39,11 @@ export function createServer({
   });
 
   const server = new Server({ name, version }, { capabilities: { tools: {} } });
+  const unsubscribe = onPythonFileRevocation(id => runtime.revoke(id));
+  server.onclose = () => {
+    unsubscribe();
+    void runtime.reset()?.catch(error => console.error(error));
+  };
   server.setRequestHandler("tools/list", () => ({ tools: toolHost.tools.map(publicToolDefinition) }));
   server.setRequestHandler("tools/call", ({ params }, { mcpReq }) =>
     toolHost.callTool(params.name, params.arguments, { signal: mcpReq.signal }));
@@ -48,15 +54,15 @@ export function createServer({
 export async function main(options = {}) {
   const reportError = error => console.error(error);
   const transport = new StdioServerTransport();
-  const handle = serveStdio(() => createServer(options), { transport, onerror: reportError });
+  const runtime = createLocalPythonRuntime();
+  const handle = serveStdio(() => createServer(options, runtime), { transport, onerror: reportError });
   let shutdown;
   const close = () => {
     if (!shutdown) {
       shutdown = (async () => {
         process.off("SIGINT", onShutdown);
         process.off("SIGTERM", onShutdown);
-        closePythonRuntime();
-        await Promise.all([handle.close(), stopViewerServer()]);
+        await Promise.all([handle.close(), stopViewerServer(), runtime.reset()]);
       })();
     }
     return shutdown;

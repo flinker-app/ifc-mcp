@@ -5,7 +5,7 @@ import { consumePythonFileHandoffs, getApprovedPythonFile } from "./approved-pyt
 import { describePythonFileHandoff } from "./python-file-handoff.js";
 import { toolResult } from "./tool-results.js";
 
-export function createDefaultIfcMcpToolHandlers(fileHandoffEntry) {
+export function createDefaultIfcMcpToolHandlers(fileHandoffEntry, runtime) {
   return createIfcMcpToolHandlers({
     "run-python": async ({ code, files, signal }) => {
       const attachments = files.map(getApprovedPythonFile);
@@ -26,7 +26,7 @@ export function createDefaultIfcMcpToolHandlers(fileHandoffEntry) {
       signal?.throwIfAborted();
       const releaseHandoffs = consumePythonFileHandoffs(attachments);
       try {
-        return await executeIfcPython({ code, attachments, signal });
+        return await executeIfcPython({ code, attachments, runtime, signal });
       } finally {
         await releaseHandoffs();
       }

@@ -1,7 +1,7 @@
 import { IFCOPENSHELL_BUILD } from "./constants.js";
 import { verifyWheel } from "./python-assets.js";
-import { normalizePythonOptions } from "./python-environment.js";
 import { abortable } from "./operations.js";
+import { createPythonSession } from "./python-session.js";
 
 const sandboxSource = `<!doctype html>
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' blob:; worker-src blob:; connect-src 'none'; base-uri 'none'; form-action 'none'">
@@ -118,50 +118,24 @@ function createSandbox(assets) {
 }
 
 export function createBrowserPythonRuntime() {
-  let sandbox;
-  let active;
-
-  function discardSandbox(reason) {
-    sandbox?.close(reason);
-    sandbox = undefined;
-    globalThis.removeEventListener?.("pagehide", reset);
-  }
-
-  function reset() {
-    const reason = new Error("Python session reset");
-    active?.abort(reason);
-    discardSandbox(reason);
-  }
-
-  return {
-    acceptsFileBlobs: true,
-    reset,
-    async runPythonInWorker(code, files = [], options = {}) {
-      if (active) throw new Error("The previous Python call is still running. Wait for it to finish.");
-      options.signal?.throwIfAborted();
-      const input = { code, files, options: normalizePythonOptions(options) };
-      const operation = new AbortController();
-      const signal = operation.signal;
-      active = operation;
-      const onAbort = () => operation.abort(options.signal.reason);
-      options.signal?.addEventListener("abort", onAbort, { once: true });
-      if (options.signal?.aborted) onAbort();
-      try {
-        if (!sandbox || sandbox.closed) {
-          globalThis.addEventListener("pagehide", reset);
-          const assets = await abortable(loadAssets(signal), signal);
-          sandbox = createSandbox(assets);
-        }
-        signal.throwIfAborted();
-        return await abortable(sandbox.run(input, options.onProgress), signal);
-      } catch (error) {
-        discardSandbox(error);
-        throw error;
-      } finally {
-        operation.abort();
-        options.signal?.removeEventListener("abort", onAbort);
-        active = undefined;
-      }
-    },
-  };
+  const session = createPythonSession(async signal => {
+    globalThis.addEventListener("pagehide", session.reset);
+    try {
+      const sandbox = createSandbox(await abortable(loadAssets(signal), signal));
+      return {
+        get closed() { return sandbox.closed; },
+        run(input, onProgress, requestSignal) {
+          return abortable(sandbox.run(input, onProgress), requestSignal);
+        },
+        close(reason) {
+          globalThis.removeEventListener("pagehide", session.reset);
+          sandbox.close(reason);
+        },
+      };
+    } catch (error) {
+      globalThis.removeEventListener("pagehide", session.reset);
+      throw error;
+    }
+  });
+  return { ...session, acceptsFileBlobs: true };
 }

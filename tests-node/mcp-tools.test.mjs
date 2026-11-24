@@ -178,6 +178,7 @@ model = ifcopenshell.open('approved.ifc')
 assert len(model.by_type('IfcWall')) == 1
 Path('report.csv').write_text('walls\\n1\\n')
 Path('approved.ifc').write_text('changed copy')
+result = process.pid
 ` });
     const report = output.saved_files.find(file => file.name === "report.csv");
     assert.ok(report?.url);
@@ -188,6 +189,19 @@ Path('approved.ifc').write_text('changed copy')
     const consumed = await client.callTool({ name: "run-python", arguments: { files: [attached.tool_path], code: "raise AssertionError('should not execute')" } });
     assert.equal(consumed.isError, true);
     assert.equal(consumed.structuredContent.file_handoff, undefined);
+
+    const renewedUpload = await promisify(execFile)(file_handoff.command, file_handoff.args);
+    const { files: [renewed] } = JSON.parse(renewedUpload.stdout);
+    const repeat = await callJsonTool(client, "run-python", { files: [renewed.tool_path], code: `
+from js import process
+import ifcopenshell
+assert len(ifcopenshell.open('approved.ifc').by_type('IfcWall')) == 1
+result = process.pid
+` });
+    assert.equal(repeat.result, output.result);
+    assert.deepEqual(await getCopies(), []);
+    const withoutFile = await callJsonTool(client, "run-python", { files: [], code: "from js import process; result = process.pid" });
+    assert.notEqual(withoutFile.result, output.result);
 
     const failedUpload = await promisify(execFile)(file_handoff.command, file_handoff.args);
     const { files: [failedAttachment] } = JSON.parse(failedUpload.stdout);
@@ -202,11 +216,13 @@ Path('approved.ifc').write_text('changed copy')
     assert.equal((await getCopies()).length, 1);
     const { python_files } = await callJsonTool(client, "open-ifc-viewer", {});
     assert.equal(python_files.find(file => file.name === "approved.ifc").tool_path, manualId);
+    await callJsonTool(client, "run-python", { files: [manualId], code: "from pathlib import Path; assert Path('approved.ifc').is_file()" });
     const revoke = new URL("/python-files/approved", picker);
     revoke.searchParams.set("id", manualId);
     const response = await fetch(revoke, { method: "DELETE", headers: { Origin: picker.origin, "X-IFC-Python-File-Token": picker.hash.slice(1) } });
     assert.equal((await response.json()).removed, true);
     assert.deepEqual(await getCopies(), []);
+    assert.deepEqual((await fs.readdir(cache)).filter(name => name.startsWith("ifc-mcp-sandbox-")), []);
     const revoked = await client.callTool({ name: "run-python", arguments: { files: [manualId], code: "raise AssertionError('should not execute')" } });
     assert.equal(revoked.isError, true);
     assert.equal(revoked.structuredContent.file_handoff, undefined);

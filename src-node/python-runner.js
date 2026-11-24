@@ -68,7 +68,7 @@ export async function executeIfcPython({
 }
 
 async function runRuntime({ code, inputFiles, runtime, signal }) {
-  const files = await buildRuntimeInputFiles(inputFiles, runtime === localPython);
+  const files = await buildRuntimeInputFiles(inputFiles, runtime === localPython || runtime.readsLocalFiles);
   signal?.throwIfAborted();
   if (runningRuntimes.has(runtime)) throw new Error("The previous Python call is still running. Wait for it to finish.");
   runningRuntimes.add(runtime);
@@ -168,7 +168,7 @@ async function buildRuntimeInputFiles(inputFiles, onDisk) {
   for (const inputFile of inputFiles) {
     const localPath = inputFile.localPath ?? inputFile.path;
     if (onDisk) {
-      files.push({ name: inputFile.name, localPath, size: inputFile.size ?? (await fs.stat(localPath)).size,
+      files.push({ name: inputFile.name, localPath, approval: inputFile.approval, size: inputFile.size ?? (await fs.stat(localPath)).size,
         sourcePath: inputFile.path, type: "application/octet-stream" });
       continue;
     }
@@ -189,10 +189,11 @@ async function buildRuntimeInputFiles(inputFiles, onDisk) {
 
 function resolveAttachments(attachments) {
   const usedNames = new Set();
-  return attachments.map(({ name, localPath, size_bytes, tool_path }, index) => ({
+  return attachments.map(({ name, localPath, size_bytes, tool_path, approval }, index) => ({
     name: uniqueInputFileName(name, usedNames, index + 1),
     path: tool_path,
     localPath,
+    approval,
     size: size_bytes,
   }));
 }

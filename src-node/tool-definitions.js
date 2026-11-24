@@ -26,7 +26,7 @@ the bundled Pyodide ${PYODIDE_VERSION} runtime and IfcOpenShell ${IFCOPENSHELL_B
 The package set includes micropip, ifcopenshell, numpy, pandas,
 matplotlib, shapely, bcf-client, ifcclash, plotly, and typing-extensions.
 Each call runs in a fresh namespace and mounts the files listed in its inputs.
-The built-in browser worker can retain data across calls in the same session.
+The worker can retain data across calls in the same session. Desktop starts a fresh worker when its approved inputs change.
 Keep the opened model assigned to a variable while accessing its entities.
 Native IFC-to-SVG export is unavailable in this runtime.
 

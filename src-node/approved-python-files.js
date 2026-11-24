@@ -1,4 +1,5 @@
 import { createWriteStream } from "node:fs";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -7,6 +8,7 @@ import { IFC_SUFFIXES } from "./constants.js";
 import { tokenUrlSafe } from "./utils.js";
 
 const approved = new Map();
+const revocationListeners = new Set();
 const sandboxHeadroom = 256n * 1024n * 1024n;
 let incomingBytes = 0n;
 let storedBytes = 0n;
@@ -31,18 +33,21 @@ export async function addApprovedPythonFile(name, readable, sizeBytes, isSession
   try {
     const directory = await fs.mkdtemp(path.join(temp, "ifc-mcp-approval-"));
     localPath = path.join(directory, "model");
+    const digest = expiresInMs === undefined ? null : createHash("sha256");
     let received = 0;
     await pipeline(readable, async function* (chunks) {
       for await (const chunk of chunks) {
         received += Buffer.byteLength(chunk);
         if (received > sizeBytes) throw new Error("The upload exceeded the selected file size.");
+        digest?.update(chunk);
         yield chunk;
       }
     }, createWriteStream(localPath, { flags: "wx", mode: 0o600 }));
     if (received !== sizeBytes) throw new Error("The upload did not match the selected file size.");
     if (!isSessionActive()) throw new Error("The file approval session ended.");
     const tool_path = `ifc-file:${tokenUrlSafe(18)}`;
-    const file = { name, localPath, size_bytes: sizeBytes, tool_path };
+    const file = { name, localPath, size_bytes: sizeBytes, tool_path,
+      approval: digest ? `handoff:${digest.digest("hex")}` : tool_path };
     if (expiresInMs !== undefined) {
       file.expiry = setTimeout(() => {
         void removeApprovedPythonFile(tool_path).catch(error => console.error(error.message));
@@ -73,18 +78,23 @@ export function consumePythonFileHandoffs(files) {
   return () => Promise.all(handoffs.map(discardApproved));
 }
 
+export function onPythonFileRevocation(listener) {
+  revocationListeners.add(listener);
+  return () => revocationListeners.delete(listener);
+}
+
 export async function removeApprovedPythonFile(id) {
   const file = approved.get(id);
   if (!file) return false;
   detach(file);
-  await discardApproved(file);
+  await Promise.all([discardApproved(file), ...Array.from(revocationListeners, listener => listener(id))]);
   return true;
 }
 
 export async function clearApprovedPythonFiles() {
   const files = [...approved.values()];
   for (const file of files) detach(file);
-  await Promise.all(files.map(discardApproved));
+  await Promise.all([...files.map(discardApproved), ...Array.from(revocationListeners, listener => listener())]);
 }
 
 function detach(file) {

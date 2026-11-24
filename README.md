@@ -39,9 +39,9 @@ Large IFC files can take more than a minute to process. Cancelling a request
 terminates its local Python worker. The next call starts a fresh runtime.
 
 The package includes Pyodide 0.28.3, the checksum-verified IfcOpenShell wheel,
-and the other Python packages needed for offline execution. The desktop CLI
-starts a fresh platform sandbox for each call. Each browser host reuses one
-network-blocked worker inside its own sandboxed iframe.
+and the other Python packages needed for offline execution. Desktop and browser
+each reuse a sandboxed Python worker. Desktop discards its worker when the
+approved inputs change or the MCP connection closes.
 
 IFC MCP accepts IFC and IFCZIP files.
 

@@ -4,9 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import { createServer } from "node:http";
 import test from "node:test";
-import { runPythonInWorker, closePythonRuntime } from "../src-node/python-local.js";
+import { createLocalPythonRuntime } from "../src-node/python-local.js";
 import { downloadWheel } from "../src-node/python-assets.js";
 import { createPythonExecutor } from "../src-node/python-runtime.js";
+
+const { runPythonInWorker, reset: closePythonRuntime } = createLocalPythonRuntime();
 
 test("wheel downloads recover after failure and reject incorrect bytes", async t => {
   let requests = 0;
@@ -35,7 +37,7 @@ test("desktop Python reads ranges of a large input from disk", { timeout: 180_00
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "ifc-mcp-large-input-"));
   const localPath = path.join(dir, "large.ifc");
   t.after(async () => {
-    closePythonRuntime();
+    await closePythonRuntime();
     await fs.unlink(localPath);
     await fs.rmdir(dir);
   });
